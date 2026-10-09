@@ -1,0 +1,23 @@
+[package]
+name = "ashmactool"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A compact native macOS menu bar toolbox written in Rust"
+license-file = "LICENSE"
+
+[dependencies]
+objc2 = "=0.6.4"
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSString"] }
+objc2-core-foundation = { version = "=0.3.2", default-features = false, features = ["std", "CFCGTypes", "objc2"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[[bin]]
+name = "ashmactool"
+path = "src/main.rs"
