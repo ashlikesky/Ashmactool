@@ -45,7 +45,7 @@ fn entry() -> Result<()> {
     match args.first().map(String::as_str) {
         Some("--help") => {
             println!(
-                "Ashmactool 0.3.0\n默认：运行菜单栏应用\n--doctor：检查接口与系统箭头，不修改指针\n--inspect FILE.cape：验证主题，不修改指针\n--preview DIRECTORY：导出箭头 PNG\n--preview-all DIRECTORY：导出整套指针预览\n--restore：恢复本工具保存的原始指针\n--self-test：短暂注册内置指针，检查后立即恢复\n--power-self-test：回读屏幕唤醒请求，再释放并回读\n--ui-smoke-test：验证原生菜单动作并恢复测试前配置"
+                "Ashmactool 0.3.1\n默认：运行菜单栏应用\n--doctor：检查接口与系统箭头，不修改指针\n--inspect FILE.cape：验证主题，不修改指针\n--preview DIRECTORY：导出箭头 PNG\n--preview-all DIRECTORY：导出整套指针预览\n--restore：恢复本工具保存的原始指针\n--self-test：短暂注册内置指针，检查后立即恢复\n--power-self-test：回读屏幕唤醒请求，再释放并回读\n--ui-smoke-test：验证原生菜单动作并恢复测试前配置"
             );
             Ok(())
         }

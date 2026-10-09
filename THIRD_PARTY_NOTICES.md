@@ -4,18 +4,26 @@ Reference: https://github.com/sdmj76/Mousecape-swiftUI
 Inspected revision: 6e5f4f3ee3ff8f38a8d1516c49a8012e760235d4
 Original project: https://github.com/alexzielenski/Mousecape
 
-This local Rust implementation refers to the cursor-registration mechanism and
-C API signatures documented by Alex Zielenski and CGSInternal. It is not the
-Mousecape application and includes no upstream SwiftUI UI, Swift CLI/helper,
-Windows conversion implementation, or sample cursor themes. The upstream
-Section B software is kept only in the local work/reference-mousecape checkout
-for inspection, and is not part of the app or source package.
+Ashmactool's independently written Rust implementation is licensed under MIT.
+Its FFI declarations are adapted from the C API signatures documented in the
+CGSInternal cursor header; that header permits commercial use and redistribution
+under the notice reproduced below. These Rust declarations are altered versions,
+not the original C header.
 
-The original notices are preserved below. New Rust code is visibly distinct
-from the upstream Objective-C/Swift implementation. This build is supplied for
-personal non-commercial use. Apple private API availability is not guaranteed.
+Mousecape and Mousecape-swiftUI were inspected as references for the registration
+mechanism. No upstream application implementation, Objective-C model/controller,
+SwiftUI UI, Swift CLI/helper, Windows conversion code, or sample theme is included
+in this repository, app, or source package. Their licenses are not relicensed by
+Ashmactool's MIT license. The historical Mousecape Section A notice below is
+retained as reference attribution, not as the license for Ashmactool's original
+implementation. The restricted Section B code remains outside this repository.
 
-## Mousecape original work notice (Section A)
+Rust dependencies retain their own licenses. Apple system frameworks and native
+cursor artwork remain Apple's materials; state previews demonstrate output from
+those system cursors. The MIT license grants no rights to third-party materials
+beyond their own licenses. Apple private API availability is not guaranteed.
+
+## Mousecape reference-only original work notice (Section A)
 
 ==============================================================================
 

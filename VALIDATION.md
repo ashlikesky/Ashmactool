@@ -1,4 +1,20 @@
-# Ashmactool 0.3.0 验证记录
+# Ashmactool 验证记录
+
+## v0.3.1 开源发布验证
+
+日期：2026-10-09。此版本更新许可、项目说明、版本号及关于窗口文案；功能逻辑与 v0.3.0 相同。
+
+- `cargo test --locked`：6 项测试通过。
+- `cargo clippy --all-targets --locked -- -D warnings`：通过。
+- `./scripts/package.sh`：release 构建和打包通过，最低构建目标 macOS 14.0。
+- `.app` 严格 ad hoc 签名校验通过；Info.plist 版本为 0.3.1 / build 4。
+- 应用资源和 ZIP 中的 MIT 许可证、第三方声明与源码一致；ZIP 完整性检查通过。
+- release 可执行文件：437,024 字节；SHA-256：`d4d176cdd96811e53a7ff7b5aa4737932457c3c8e68d3794785855b83e366738`。
+- arm64 ZIP：1,669,695 字节；SHA-256：`00a30f986bfd4d8c42b181bb3e126cead647467374da7162031d38ac71160d0e`。
+
+本次未重新运行会修改系统状态的菜单、指针及电源自测；此前实机功能验证及其范围记录如下。
+
+## v0.3.0 功能验证记录
 
 日期：2026-10-09。环境：Apple Silicon / arm64，macOS 27.0（26A428）；Rust 1.97.1。
 

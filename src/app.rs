@@ -564,8 +564,8 @@ extern "C-unwind" fn login(_: &AnyObject, _: Sel, _: *mut AnyObject) {
 extern "C-unwind" fn about(_: &AnyObject, _: Sel, _: *mut AnyObject) {
     action(|_| {
         native::alert(
-            "Ashmactool 0.3.0",
-            "Rust 编写的原生菜单栏工具箱。\n\n指针样式 · PNG / .cape 导入 · 保持屏幕唤醒\n\n屏幕唤醒防止闲置熄屏；合盖、手动睡眠和锁屏仍由系统处理。关闭开关或退出时释放。重启应用默认关闭。\n\n退出时恢复原始指针。系统沙滩球受接口限制以 24 帧恢复原生外观和周期，完整原始帧单独保留。\n\n私有光标接口思路来自 Alex Zielenski 的 Mousecape；参考 sdmj76 的现代版本。个人非商业使用。\n\n部分应用自行绘制指针，可能覆盖系统主题。系统升级后可能需要兼容性更新。\n\n导入主题和原始指针备份保存在用户的 Application Support/Ashmactool 中。",
+            "Ashmactool 0.3.1",
+            "Rust 编写的原生菜单栏工具箱。\n\n指针样式 · PNG / .cape 导入 · 保持屏幕唤醒\n\n屏幕唤醒防止闲置熄屏；合盖、手动睡眠和锁屏仍由系统处理。关闭开关或退出时释放。重启应用默认关闭。\n\n退出时恢复原始指针。系统沙滩球受接口限制以 24 帧恢复原生外观和周期，完整原始帧单独保留。\n\n私有光标接口思路来自 Alex Zielenski 的 Mousecape；参考 sdmj76 的现代版本。独立 Rust 实现采用 MIT 许可，第三方声明随包保留。\n\n部分应用自行绘制指针，可能覆盖系统主题。系统升级后可能需要兼容性更新。\n\n导入主题和原始指针备份保存在用户的 Application Support/Ashmactool 中。",
         );
         Ok(())
     });

@@ -1,5 +1,7 @@
 # Ashmactool
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 <img src="assets/AppIcon.png" width="160" alt="Ashmactool 图标">
 
 Rust 编写的 macOS 菜单栏小工具箱。原生 AppKit 界面、单进程、没有 WebView，空闲时通过系统事件响应变化。
@@ -58,6 +60,8 @@ Rust 编写的 macOS 菜单栏小工具箱。原生 AppKit 界面、单进程、
 需要 macOS、Xcode Command Line Tools 和 Rust 1.85 或更新版本。
 
 ```sh
+git clone https://github.com/ashlikesky/Ashmactool.git
+cd Ashmactool
 cargo build --release --locked
 cargo test --locked
 cargo clippy --all-targets --locked -- -D warnings
@@ -84,4 +88,6 @@ cargo run --locked -- --ui-smoke-test
 
 参考 [Mousecape-swiftUI](https://github.com/sdmj76/Mousecape-swiftUI) 与原始 [Mousecape](https://github.com/alexzielenski/Mousecape) 的光标注册思路，Rust 实现独立编写，未打包上游 SwiftUI 代码、辅助程序或示例主题。参考版本和完整许可说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-本项目采用 [个人非商业使用许可](LICENSE)。指针替换依赖 Apple 私有接口，系统升级后可能需要兼容性更新。屏幕唤醒使用 Apple 的公开 [IOPMAssertionCreateWithName](https://developer.apple.com/documentation/iokit/1557134-iopmassertioncreatewithname) 接口。
+本项目独立编写的 Rust 实现自 v0.3.1 起采用 [MIT 许可证](LICENSE)，允许使用、修改、再分发和商业使用，需保留版权及许可声明。第三方依赖与材料遵循各自许可；MIT 不重新授权上游 Mousecape 的代码。CGSInternal 接口声明的来源及许可已保留。欢迎通过 [Issues](https://github.com/ashlikesky/Ashmactool/issues) 反馈问题或提交 Pull Request，参与方式见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+指针替换依赖 Apple 私有接口，系统升级后可能需要兼容性更新。屏幕唤醒使用 Apple 的公开 [IOPMAssertionCreateWithName](https://developer.apple.com/documentation/iokit/1557134-iopmassertioncreatewithname) 接口。
