@@ -31,8 +31,8 @@ cat > "$app_bundle/Contents/Info.plist" <<'PLIST'
 <key>CFBundleDisplayName</key><string>Ashmactool</string>
 <key>CFBundleExecutable</key><string>ashmactool</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.2.0</string>
-<key>CFBundleVersion</key><string>2</string>
+<key>CFBundleShortVersionString</key><string>0.3.0</string>
+<key>CFBundleVersion</key><string>3</string>
 <key>CFBundleIconFile</key><string>AppIcon.icns</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSUIElement</key><true/>
@@ -42,6 +42,7 @@ cat > "$app_bundle/Contents/Info.plist" <<'PLIST'
 PLIST
 codesign --force --sign - --identifier com.ashlikesky.ashmactool --timestamp=none "$app_bundle"
 codesign --verify --deep --strict "$app_bundle"
-ditto -c -k --sequesterRsrc --keepParent "$app_bundle" "$output_root/Ashmactool-macOS-$(uname -m).zip"
+ditto -c -k --sequesterRsrc --keepParent "$app_bundle" "$icon_work/Ashmactool.zip"
+mv "$icon_work/Ashmactool.zip" "$output_root/Ashmactool-macOS-$(uname -m).zip"
 printf 'Built: %s\n' "$app_bundle"
 du -sh "$app_bundle" "$output_root/Ashmactool-macOS-$(uname -m).zip"

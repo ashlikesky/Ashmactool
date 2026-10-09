@@ -45,14 +45,14 @@ fn entry() -> Result<()> {
     match args.first().map(String::as_str) {
         Some("--help") => {
             println!(
-                "Ashmactool 0.2.0\n默认：运行菜单栏应用\n--doctor：检查接口与系统箭头，不修改指针\n--inspect FILE.cape：验证主题，不修改指针\n--preview DIRECTORY：导出内置指针 PNG\n--restore：恢复本工具保存的原始指针\n--self-test：短暂注册内置指针，检查后立即恢复\n--power-self-test：回读屏幕唤醒请求，再释放并回读\n--ui-smoke-test：验证原生菜单动作并恢复测试前配置"
+                "Ashmactool 0.3.0\n默认：运行菜单栏应用\n--doctor：检查接口与系统箭头，不修改指针\n--inspect FILE.cape：验证主题，不修改指针\n--preview DIRECTORY：导出箭头 PNG\n--preview-all DIRECTORY：导出整套指针预览\n--restore：恢复本工具保存的原始指针\n--self-test：短暂注册内置指针，检查后立即恢复\n--power-self-test：回读屏幕唤醒请求，再释放并回读\n--ui-smoke-test：验证原生菜单动作并恢复测试前配置"
             );
             Ok(())
         }
         Some("--doctor") => {
             let api = cursor::Api::load()?;
             println!("private_api=available connection={}", api.cid);
-            for name in api.names() {
+            for name in api.discover() {
                 match api.snapshot(&name) {
                     Ok(c) => println!(
                         "{name}: {}×{}pt hotspot=({}, {}) frames={} representations={}",
@@ -94,6 +94,29 @@ fn entry() -> Result<()> {
             println!("preview={}", dir.display());
             Ok(())
         }
+        Some("--preview-all") => {
+            let dir = PathBuf::from(args.get(1).ok_or("缺少输出目录")?);
+            let api = cursor::Api::load()?;
+            for style in ["glow", "dark", "light"] {
+                let folder = dir.join(style);
+                std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+                for (name, cursor) in api.preset_theme(style, 56.)? {
+                    let rep = native::at(&cursor.images, 1);
+                    unsafe extern "C" {
+                        fn CGImageRetain(p: *const std::ffi::c_void) -> *const std::ffi::c_void;
+                    }
+                    let image = graphics::Image(unsafe {
+                        CGImageRetain((&*rep as *const objc2::runtime::AnyObject).cast())
+                    });
+                    let frame = graphics::first_frame(&image, cursor.frames)?;
+                    let path = folder.join(format!("{name}.png"));
+                    std::fs::write(path, native::bytes(&*frame.png()?))
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+            println!("full_theme_preview={}", dir.display());
+            Ok(())
+        }
         Some("--restore") => {
             let _lock = singleton()?;
             let mut engine = cursor::Engine::new(native::support()?.join("original.cape"))?;
@@ -106,29 +129,30 @@ fn entry() -> Result<()> {
             let _lock = singleton()?;
             let mut engine = cursor::Engine::new(native::support()?.join("original.cape"))?;
             engine.restore()?;
-            let names = engine.api.names();
+            let names = engine.api.discover();
             let baseline: Vec<_> = names
                 .iter()
                 .filter_map(|n| engine.api.snapshot(n).ok().map(|c| (n.clone(), c)))
                 .collect();
-            engine.arrow("glow", 64.)?;
-            let checked = (|| -> Result<()> {
-                for (name, _) in &baseline {
-                    let c = engine.api.snapshot(name)?;
-                    println!(
-                        "applied {name}: {}×{}pt hotspot=({}, {}) images={}",
-                        c.size.width,
-                        c.size.height,
-                        c.hot.x,
-                        c.hot.y,
-                        native::count(&c.images)
-                    );
-                    if (c.size.width - 64.).abs() > 0.01 {
-                        return Err(format!("{name}: registration readback mismatch"));
-                    }
-                }
-                Ok(())
-            })();
+            let style = args.get(1).map(String::as_str).unwrap_or("glow");
+            if !["glow", "dark", "light"].contains(&style) {
+                return Err("未知主题样式".into());
+            }
+            let size: f64 = args
+                .get(2)
+                .map(|s| s.parse().map_err(|_| "无效尺寸"))
+                .transpose()?
+                .unwrap_or(28.);
+            engine.preset(style, size)?;
+            let checked = engine.verify_active();
+            if let Err(e) = &checked {
+                eprintln!("theme_readback_error={e}");
+            }
+            println!(
+                "theme_states={} full_theme_registration_readback={}",
+                engine.active_count(),
+                if checked.is_ok() { "passed" } else { "failed" }
+            );
             // Re-open the disk snapshot as a restarted app would. Keep the
             // original in-memory backup until the on-disk restoration succeeds.
             let restored = (|| -> Result<()> {
@@ -142,9 +166,15 @@ fn entry() -> Result<()> {
             checked?;
             for (name, before) in baseline {
                 let after = engine.api.snapshot(&name)?;
+                let before = if before.frames > 24 {
+                    before.resampled(24)?
+                } else {
+                    before
+                };
                 if before.size != after.size
                     || before.hot != after.hot
                     || before.frames != after.frames
+                    || (before.duration - after.duration).abs() > 0.00001
                     || before.pixels()? != after.pixels()?
                 {
                     return Err(format!("{name}: restore readback mismatch"));

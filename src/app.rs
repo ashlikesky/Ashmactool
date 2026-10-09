@@ -29,7 +29,7 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             style: "none".into(),
-            size: 32.,
+            size: 28.,
             path: String::new(),
             hot: Point::new(0., 0.),
         }
@@ -51,12 +51,19 @@ impl Preferences {
                 .map(|v| native::text(&v))
                 .unwrap_or_default()
         };
-        let p = Self {
+        let mut p = Self {
             style: s("Style"),
             size: native::numeric(&d, "Size")?,
             path: s("Path"),
             hot: Point::new(native::numeric(&d, "HotX")?, native::numeric(&d, "HotY")?),
         };
+        if native::get(&d, "SizeSchema").is_none() {
+            p.size *= 0.875;
+            if p.style == "image" {
+                p.hot.x *= 0.875;
+                p.hot.y *= 0.875;
+            }
+        }
         if !["none", "glow", "dark", "light", "image", "cape"].contains(&p.style.as_str())
             || !p.size.is_finite()
             || !(16.0..=64.0).contains(&p.size)
@@ -67,6 +74,7 @@ impl Preferences {
     }
     fn save(&self) -> Result<()> {
         let d = native::dictionary();
+        native::insert(&d, "SizeSchema", &native::number(1.));
         native::insert(&d, "Style", &native::string(&self.style));
         native::insert(&d, "Path", &native::string(&self.path));
         for (k, v) in [
@@ -80,9 +88,9 @@ impl Preferences {
     }
     fn label(&self) -> &str {
         match self.style.as_str() {
-            "glow" => "柔光箭头",
-            "dark" => "黑色箭头",
-            "light" => "白色箭头",
+            "glow" => "柔光主题",
+            "dark" => "黑色主题",
+            "light" => "白色主题",
             "image" => "自定义图片",
             "cape" => "导入主题",
             _ => "系统默认",
@@ -136,7 +144,7 @@ impl App {
             "cape" => self
                 .engine
                 .apply(cursor::theme(&PathBuf::from(&new.path))?)?,
-            s => self.engine.arrow(s, new.size)?,
+            s => self.engine.preset(s, new.size)?,
         }
         if let Err(e) = new.save() {
             self.engine.restore()?;
@@ -204,9 +212,9 @@ impl App {
             );
             self.separator(&self.menu);
             for (tag, key, label) in [
-                (1, "glow", "柔光箭头"),
-                (2, "dark", "黑色箭头"),
-                (3, "light", "白色箭头"),
+                (1, "glow", "柔光主题"),
+                (2, "dark", "黑色主题"),
+                (3, "light", "白色主题"),
             ] {
                 self.add(
                     &self.cursor_menu,
@@ -218,6 +226,14 @@ impl App {
                 );
             }
             self.separator(&self.cursor_menu);
+            self.add(
+                &self.cursor_menu,
+                &format!("{} 项系统指针已应用", self.engine.active_count()),
+                None,
+                9,
+                false,
+                false,
+            );
             self.add(
                 &self.cursor_menu,
                 "导入图片或主题…",
@@ -234,13 +250,18 @@ impl App {
                 false,
                 self.prefs.style == "image",
             );
-            for (n, label) in [(32, "更小"), (40, "小"), (52, "中"), (64, "大")] {
+            for (tag, n, label) in [
+                (100, 28., "更小"),
+                (101, 35., "小"),
+                (102, 45.5, "中"),
+                (103, 56., "大"),
+            ] {
                 self.add(
                     &self.size_menu,
                     label,
                     Some(sel!(resize:)),
-                    n,
-                    (self.prefs.size - n as f64).abs() < 0.1,
+                    tag,
+                    (self.prefs.size - n).abs() < 0.1,
                     self.prefs.style != "cape",
                 );
             }
@@ -340,7 +361,13 @@ extern "C-unwind" fn resize(_: &AnyObject, _: Sel, sender: *mut AnyObject) {
     let tag: isize = unsafe { msg_send![sender, tag] };
     action(|a| {
         let mut p = a.prefs.clone();
-        p.size = tag as f64;
+        p.size = match tag {
+            100 => 28.,
+            101 => 35.,
+            102 => 45.5,
+            103 => 56.,
+            _ => return Err("无效的指针尺寸".into()),
+        };
         if p.style == "image" {
             p.hot.x *= p.size / a.prefs.size;
             p.hot.y *= p.size / a.prefs.size;
@@ -537,8 +564,8 @@ extern "C-unwind" fn login(_: &AnyObject, _: Sel, _: *mut AnyObject) {
 extern "C-unwind" fn about(_: &AnyObject, _: Sel, _: *mut AnyObject) {
     action(|_| {
         native::alert(
-            "Ashmactool 0.2.0",
-            "Rust 编写的原生菜单栏工具箱。\n\n指针样式 · PNG / .cape 导入 · 保持屏幕唤醒\n\n屏幕唤醒防止闲置熄屏；合盖、手动睡眠和锁屏仍由系统处理。关闭开关或退出时释放。重启应用默认关闭。\n\n退出时恢复原始指针\n\n私有光标接口思路来自 Alex Zielenski 的 Mousecape；参考 sdmj76 的现代版本。个人非商业使用。\n\n部分应用自行绘制指针，可能覆盖系统主题。系统升级后可能需要兼容性更新。\n\n导入主题和原始指针备份保存在用户的 Application Support/Ashmactool 中。",
+            "Ashmactool 0.3.0",
+            "Rust 编写的原生菜单栏工具箱。\n\n指针样式 · PNG / .cape 导入 · 保持屏幕唤醒\n\n屏幕唤醒防止闲置熄屏；合盖、手动睡眠和锁屏仍由系统处理。关闭开关或退出时释放。重启应用默认关闭。\n\n退出时恢复原始指针。系统沙滩球受接口限制以 24 帧恢复原生外观和周期，完整原始帧单独保留。\n\n私有光标接口思路来自 Alex Zielenski 的 Mousecape；参考 sdmj76 的现代版本。个人非商业使用。\n\n部分应用自行绘制指针，可能覆盖系统主题。系统升级后可能需要兼容性更新。\n\n导入主题和原始指针备份保存在用户的 Application Support/Ashmactool 中。",
         );
         Ok(())
     });
@@ -670,10 +697,10 @@ pub fn run(smoke_test: bool) -> Result<()> {
                 {
                     return Err("菜单样式动作未生效".into());
                 }
-                let smaller: Obj = msg_send![&sizes,itemWithTag:32isize];
+                let smaller: Obj = msg_send![&sizes,itemWithTag:100isize];
                 let dispatched: bool =
                     msg_send![&app,sendAction:sel!(resize:),to:&*target,from:&*smaller];
-                if !dispatched || APP.with(|s| s.borrow().as_ref().unwrap().prefs.size != 32.) {
+                if !dispatched || APP.with(|s| s.borrow().as_ref().unwrap().prefs.size != 28.) {
                     return Err("菜单更小尺寸动作未生效".into());
                 }
                 APP.with(|s| -> Result<()> {
@@ -681,7 +708,7 @@ pub fn run(smoke_test: bool) -> Result<()> {
                     let a = slot.as_ref().unwrap();
                     for name in a.engine.api.names() {
                         let c = a.engine.api.snapshot(&name)?;
-                        if c.size.width != 32. || c.hot != Point::new(6.5, 5.) {
+                        if c.size.width != 28. || c.hot != Point::new(5.6875, 4.375) {
                             return Err(format!("{name}: 更小尺寸系统回读失败"));
                         }
                     }
@@ -710,7 +737,7 @@ pub fn run(smoke_test: bool) -> Result<()> {
                     return Err("菜单恢复动作未生效".into());
                 }
                 println!(
-                    "native_menu_dispatch=passed style_switch=passed smaller_32pt_readback=passed awake_toggle=passed reset=passed"
+                    "native_menu_dispatch=passed style_switch=passed smaller_28pt_readback=passed awake_toggle=passed reset=passed"
                 );
                 Ok(())
             })();

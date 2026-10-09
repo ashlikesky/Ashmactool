@@ -4,7 +4,7 @@ use crate::{
     graphics::{self, Image},
     native::{self, Obj, Result},
 };
-use objc2::{msg_send, runtime::AnyObject};
+use objc2::{class, msg_send, runtime::AnyObject, sel};
 use objc2_core_foundation::{CGPoint as Point, CGSize as Size};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -63,6 +63,7 @@ pub struct Api {
     _handles: Vec<*mut c_void>,
     dock: Option<Dock>,
     core_copy: Option<CoreCopy>,
+    _standard_cursors: Vec<Obj>,
 }
 impl Api {
     pub fn load() -> Result<Self> {
@@ -85,6 +86,25 @@ impl Api {
         };
         // Function pointer ABIs match the upstream C declarations; symbols are checked first.
         unsafe {
+            let mut cursors = Vec::new();
+            // New AppKit resize cursors are created lazily. Warm the public
+            // factories without setting the visible cursor, then discover IDs.
+            let modern: bool = msg_send![class!(NSCursor),respondsToSelector:sel!(frameResizeCursorFromPosition:inDirections:)];
+            if modern {
+                for position in [1usize, 2, 4, 8, 3, 9, 6, 12] {
+                    for direction in [1usize, 2, 3] {
+                        let c: Obj = msg_send![class!(NSCursor),frameResizeCursorFromPosition:position,inDirections:direction];
+                        cursors.push(c);
+                    }
+                }
+                for directions in [1usize, 2, 3] {
+                    let column: Obj =
+                        msg_send![class!(NSCursor),columnResizeCursorInDirections:directions];
+                    let row: Obj =
+                        msg_send![class!(NSCursor),rowResizeCursorInDirections:directions];
+                    cursors.extend([column, row]);
+                }
+            }
             let main: Main = std::mem::transmute(resolve(c"CGSMainConnectionID")?);
             let cid = main();
             if cid == 0 {
@@ -109,6 +129,7 @@ impl Api {
                     .ok()
                     .map(|p| std::mem::transmute::<*mut c_void, CoreCopy>(p)),
                 _handles: handles,
+                _standard_cursors: cursors,
             })
         }
     }
@@ -131,7 +152,31 @@ impl Api {
         }
         names
     }
+    pub fn discover(&self) -> BTreeSet<String> {
+        let mut names = self.names();
+        for id in 0..256 {
+            let p = unsafe { (self.name)(id) };
+            if !p.is_null() {
+                let name = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
+                if name.starts_with("com.apple.") && name.len() <= 256 {
+                    names.insert(name);
+                }
+            }
+        }
+        // CoreCursor has its own identifier space, distinct from CGS system IDs.
+        // Probe images instead of guessing which numeric names this OS supports.
+        for id in 0..128 {
+            let name = format!("com.apple.cursor.{id}");
+            if self.snapshot(&name).is_ok() {
+                names.insert(name);
+            }
+        }
+        names
+    }
     pub fn snapshot(&self, name: &str) -> Result<Cursor> {
+        self.snapshot_with_limit(name, 64)
+    }
+    pub fn snapshot_with_limit(&self, name: &str, max_frames: usize) -> Result<Cursor> {
         let n = CString::new(name).map_err(|_| "无效指针名称")?;
         let (mut size, mut hot, mut frames, mut duration, mut images) = (
             Size::new(0., 0.),
@@ -143,7 +188,20 @@ impl Api {
         let core_id = name
             .strip_prefix("com.apple.cursor.")
             .and_then(|s| s.parse::<i32>().ok());
-        let error = if let (Some(id), Some(copy)) = (core_id, self.core_copy) {
+        let named_error = unsafe {
+            (self.copy)(
+                self.cid,
+                n.as_ptr(),
+                &mut size,
+                &mut hot,
+                &mut frames,
+                &mut duration,
+                &mut images,
+            )
+        };
+        let error = if named_error == 0 && !images.is_null() {
+            named_error
+        } else if let (Some(id), Some(copy)) = (core_id, self.core_copy) {
             unsafe {
                 copy(
                     self.cid,
@@ -156,17 +214,7 @@ impl Api {
                 )
             }
         } else {
-            unsafe {
-                (self.copy)(
-                    self.cid,
-                    n.as_ptr(),
-                    &mut size,
-                    &mut hot,
-                    &mut frames,
-                    &mut duration,
-                    &mut images,
-                )
-            }
+            named_error
         };
         if error != 0 || images.is_null() {
             return Err(format!("无法备份 {name}（CGError {error}）"));
@@ -175,7 +223,7 @@ impl Api {
         // Never replace a cursor whose native form cannot be registered back.
         // Some system wait cursors have 30 frames; preserve those rather than
         // downsampling the user's original during restoration.
-        graphics::validate(size, hot, frames, duration)
+        graphics::validate_with_limit(size, hot, frames, duration, max_frames)
             .map_err(|e| format!("{name} 的原始指针无法完整恢复：{e}"))?;
         if native::count(&images) == 0 || native::count(&images) > 4 {
             return Err(format!("{name} 的原始图片表示超出备份范围"));
@@ -227,6 +275,51 @@ impl Api {
             ))
         }
     }
+    pub fn preset_theme(&self, style: &str, size: f64) -> Result<BTreeMap<String, Cursor>> {
+        let mut entries = BTreeMap::new();
+        let arrows = self.names();
+        for n in self.discover() {
+            if n.ends_with(".Empty") {
+                continue;
+            } // Hidden stays hidden.
+            if arrows.contains(&n) || n == "com.apple.cursor.0" {
+                entries.insert(n, Cursor::preset(style, size)?);
+            } else if n == "com.apple.cursor.7" || n == "com.apple.cursor.8" {
+                let images = native::array();
+                for scale in [1, 2] {
+                    let img = graphics::crosshair(style, scale, n.ends_with(".8"))?;
+                    unsafe {
+                        native::append(&images, &*img.0.cast::<AnyObject>());
+                    }
+                }
+                entries.insert(
+                    n,
+                    Cursor {
+                        size: Size::new(size, size),
+                        hot: Point::new(size / 2., size / 2.),
+                        frames: 1,
+                        duration: 0.,
+                        images,
+                    },
+                );
+            } else if let Ok(original) = self.snapshot(&n) {
+                if original.frames > 24 && !native_wait(&n) {
+                    continue;
+                }
+                // Legacy badge aliases may report placeholder images. Use the
+                // matching full CoreCursor silhouette rather than a placeholder.
+                let source = match n.as_str() {
+                    "com.apple.coregraphics.Alias" => self.snapshot("com.apple.cursor.2")?,
+                    "com.apple.coregraphics.Copy" => self.snapshot("com.apple.cursor.5")?,
+                    "com.apple.coregraphics.Move" => self.snapshot("com.apple.cursor.39")?,
+                    "com.apple.coregraphics.IBeamXOR" => self.snapshot("com.apple.cursor.1")?,
+                    _ => original,
+                };
+                entries.insert(n, Cursor::themed(&source, style, size)?);
+            }
+        }
+        Ok(entries)
+    }
     pub fn refresh(&self, name: &str) {
         if let Ok(n) = CString::new(name) {
             let mut seed = 0;
@@ -245,6 +338,67 @@ pub struct Cursor {
     pub images: Obj,
 }
 impl Cursor {
+    pub fn resampled(&self, frames: usize) -> Result<Self> {
+        let images = native::array();
+        unsafe extern "C" {
+            fn CGImageRetain(p: Ptr) -> Ptr;
+        }
+        for i in 0..native::count(&self.images) {
+            let source = native::at(&self.images, i);
+            let source = Image(unsafe { CGImageRetain((&*source as *const AnyObject).cast()) });
+            let image = graphics::resample_sprite(&source, self.frames, frames)?;
+            unsafe {
+                native::append(&images, &*image.0.cast::<AnyObject>());
+            }
+        }
+        Ok(Self {
+            size: self.size,
+            hot: self.hot,
+            frames,
+            duration: self.duration * self.frames as f64 / frames as f64,
+            images,
+        })
+    }
+    pub fn themed(original: &Self, style: &str, points: f64) -> Result<Self> {
+        let last = native::at(&original.images, native::count(&original.images) - 1);
+        unsafe extern "C" {
+            fn CGImageRetain(p: Ptr) -> Ptr;
+        }
+        let source = Image(unsafe { CGImageRetain((&*last as *const AnyObject).cast()) });
+        let frames = original.frames.min(24);
+        let images = native::array();
+        for scale in [1, 2] {
+            let img = graphics::themed_sprite(
+                &source,
+                original.size,
+                original.frames,
+                frames,
+                style,
+                scale,
+            )?;
+            unsafe {
+                native::append(&images, &*img.0.cast::<AnyObject>());
+            }
+        }
+        let ratio = 40. / original.size.width.max(original.size.height);
+        let hot = Point::new(
+            ((64. - original.size.width * ratio) / 2. + original.hot.x * ratio) * points / 64.,
+            ((64. - original.size.height * ratio) / 2. + original.hot.y * ratio) * points / 64.,
+        );
+        let out = Self {
+            size: Size::new(points, points),
+            hot,
+            frames,
+            duration: if frames > 1 {
+                original.duration * original.frames as f64 / frames as f64
+            } else {
+                0.
+            },
+            images,
+        };
+        graphics::validate(out.size, out.hot, out.frames, out.duration)?;
+        Ok(out)
+    }
     pub fn preset(style: &str, points: f64) -> Result<Self> {
         let images = native::array();
         for scale in [1, 2] {
@@ -296,6 +450,9 @@ impl Cursor {
         })
     }
     fn from_plist(d: &AnyObject) -> Result<Self> {
+        Self::from_plist_with_limit(d, 24)
+    }
+    fn from_plist_with_limit(d: &AnyObject, max_frames: usize) -> Result<Self> {
         if !native::kind(d, c"NSDictionary") {
             return Err("指针条目必须是字典".into());
         }
@@ -308,12 +465,12 @@ impl Cursor {
             native::numeric(d, "HotSpotY")?,
         );
         let frame_value = native::numeric(d, "FrameCount")?;
-        if frame_value.fract() != 0. || !(1.0..=24.0).contains(&frame_value) {
-            return Err("动画帧数必须是 1–24 的整数".into());
+        if frame_value.fract() != 0. || !(1.0..=max_frames as f64).contains(&frame_value) {
+            return Err(format!("动画帧数必须是 1–{max_frames} 的整数"));
         }
         let frames = frame_value as usize;
         let duration = native::numeric(d, "FrameDuration")?;
-        graphics::validate(size, hot, frames, duration)?;
+        graphics::validate_with_limit(size, hot, frames, duration, max_frames)?;
         let reps = native::get(d, "Representations").ok_or("没有指针图片")?;
         if !native::kind(&reps, c"NSArray") || native::count(&reps) == 0 || native::count(&reps) > 4
         {
@@ -378,6 +535,9 @@ impl Cursor {
 }
 
 pub fn theme(path: &Path) -> Result<BTreeMap<String, Cursor>> {
+    read_theme(path, false)
+}
+fn read_theme(path: &Path, backup: bool) -> Result<BTreeMap<String, Cursor>> {
     let root = native::read_plist(path)?;
     if !native::kind(&root, c"NSDictionary") {
         return Err("主题根节点必须是字典".into());
@@ -401,12 +561,22 @@ pub fn theme(path: &Path) -> Result<BTreeMap<String, Cursor>> {
             return Err("主题包含无效的系统指针名称".into());
         }
         let value = native::get(&entries, &name).ok_or("缺失指针")?;
-        result.insert(name, Cursor::from_plist(&value)?);
+        let max = if backup && native_wait(&name) { 64 } else { 24 };
+        let value = if max == 24 {
+            Cursor::from_plist(&value)?
+        } else {
+            Cursor::from_plist_with_limit(&value, max)?
+        };
+        result.insert(name, value);
     }
     if result.is_empty() {
         return Err("主题中没有指针".into());
     }
     Ok(result)
+}
+
+fn native_wait(name: &str) -> bool {
+    matches!(name, "com.apple.coregraphics.Wait" | "com.apple.cursor.6")
 }
 
 pub struct Engine {
@@ -421,7 +591,7 @@ impl Engine {
     pub fn new(backup_path: PathBuf) -> Result<Self> {
         let api = Api::load()?;
         let backups = if backup_path.exists() {
-            theme(&backup_path)?
+            read_theme(&backup_path, true)?
         } else {
             BTreeMap::new()
         };
@@ -452,9 +622,13 @@ impl Engine {
         let mut missing = vec![];
         for name in desired.keys() {
             match self.api.snapshot(name) {
-                Ok(c) => {
+                Ok(c) if c.frames <= 24 || native_wait(name) => {
                     self.backups.insert(name.clone(), c);
                 }
+                Ok(_) => missing.push((
+                    name.clone(),
+                    format!("{name} 原生动画无法完整恢复，保持原样"),
+                )),
                 Err(e) => missing.push((name.clone(), e)),
             }
         }
@@ -493,12 +667,9 @@ impl Engine {
         self.error = None;
         Ok(())
     }
-    pub fn arrow(&mut self, style: &str, size: f64) -> Result<()> {
-        let mut entries = BTreeMap::new();
-        for n in self.api.names() {
-            entries.insert(n, Cursor::preset(style, size)?);
-        }
-        self.apply(entries)
+    pub fn preset(&mut self, style: &str, size: f64) -> Result<()> {
+        self.restore()?;
+        self.apply(self.api.preset_theme(style, size)?)
     }
     pub fn picture(&mut self, path: &Path, size: f64, hot: Point) -> Result<()> {
         let mut entries = BTreeMap::new();
@@ -523,9 +694,44 @@ impl Engine {
         // Stop event-driven reapplication even if restoration itself needs a retry.
         self.active.clear();
         let mut failures = vec![];
+        if self.backups.values().any(|c| c.frames > 24) {
+            let archive = self.backup_path.with_file_name("native-original.cape");
+            if !archive.exists() {
+                // Retain all original frames, even though this OS only accepts
+                // 24 on registration. Never overwrite this lossless archive.
+                std::fs::copy(&self.backup_path, &archive).map_err(|e| e.to_string())?;
+            }
+        }
         for (name, c) in &self.backups {
-            if let Err(e) = self.api.register(name, c) {
+            let reduced;
+            let restore = if c.frames > 24 {
+                reduced = c.resampled(24)?;
+                &reduced
+            } else {
+                c
+            };
+            let result = self.api.register(name, restore);
+            if let Err(e) = result {
                 failures.push(e);
+            }
+        }
+        // The native wait animation has 30 frames; this API accepts only 24.
+        // Restore its original appearance and total cycle time, verify every
+        // selected frame, and retain the full 30-frame source in the archive.
+        if failures.is_empty() {
+            for (name, before) in &self.backups {
+                if before.frames <= 24 {
+                    continue;
+                }
+                let expected = before.resampled(24)?;
+                match self.api.snapshot(name) {
+                    Ok(after)
+                        if expected.size == after.size
+                            && expected.hot == after.hot
+                            && expected.frames == after.frames
+                            && expected.pixels()? == after.pixels()? => {}
+                    _ => failures.push(format!("{name} 的原生动画恢复回读不一致，保留备份")),
+                }
             }
         }
         if !failures.is_empty() {
@@ -547,11 +753,114 @@ impl Engine {
     pub fn active_count(&self) -> usize {
         self.active.len()
     }
+    pub fn verify_active(&self) -> Result<()> {
+        for (name, expected) in &self.active {
+            let actual = self.api.snapshot(name)?;
+            if (actual.size.width - expected.size.width).abs() > 0.0001
+                || (actual.size.height - expected.size.height).abs() > 0.0001
+                || (actual.hot.x - expected.hot.x).abs() > 0.0001
+                || (actual.hot.y - expected.hot.y).abs() > 0.0001
+                || actual.frames != expected.frames
+                || (actual.duration - expected.duration).abs() > 0.00001
+                || actual.pixels()? != expected.pixels()?
+            {
+                let a = actual.pixels()?;
+                let e = expected.pixels()?;
+                let dimensions = |p: &Vec<Vec<u8>>| {
+                    p.iter()
+                        .map(|x| {
+                            format!(
+                                "{}x{}",
+                                u64::from_le_bytes(x[..8].try_into().unwrap()),
+                                u64::from_le_bytes(x[8..16].try_into().unwrap())
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let delta = a
+                    .iter()
+                    .zip(&e)
+                    .flat_map(|(a, e)| a[16..].iter().zip(&e[16..]).map(|(a, e)| a.abs_diff(*e)))
+                    .max()
+                    .unwrap_or(0);
+                return Err(format!(
+                    "{name} 的主题注册回读不一致：size {:?}/{:?}, hot {:?}/{:?}, frames {}/{}, images {:?}/{:?}, max_delta={delta}",
+                    actual.size,
+                    expected.size,
+                    actual.hot,
+                    expected.hot,
+                    actual.frames,
+                    expected.frames,
+                    dimensions(&a),
+                    dimensions(&e)
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_animation_keeps_cycle_time_and_lossless_archive_data() {
+        objc2::rc::autoreleasepool(|_| {
+            let one = graphics::preset("dark", 2).unwrap();
+            let strip = graphics::resample_sprite(&one, 1, 30).unwrap();
+            let images = native::array();
+            unsafe {
+                native::append(&images, &*strip.0.cast::<AnyObject>());
+            }
+            let original = Cursor {
+                size: Size::new(64., 64.),
+                hot: Point::new(13., 10.),
+                frames: 30,
+                duration: 1. / 60.,
+                images,
+            };
+            let d = original.plist().unwrap();
+            assert!(Cursor::from_plist(&d).is_err());
+            let archived = Cursor::from_plist_with_limit(&d, 64).unwrap();
+            assert_eq!(archived.frames, 30);
+            assert_eq!(archived.pixels().unwrap(), original.pixels().unwrap());
+            let restored = archived.resampled(24).unwrap();
+            assert_eq!(restored.frames, 24);
+            assert!((restored.duration * 24. - original.duration * 30.).abs() < 1e-12);
+        });
+    }
+    #[test]
+    fn complete_themes_preserve_animation_and_valid_hotspots_at_all_sizes() {
+        objc2::rc::autoreleasepool(|_| {
+            let original = Cursor::preset("light", 64.).unwrap();
+            for style in ["glow", "dark", "light"] {
+                for size in [28., 35., 45.5, 56.] {
+                    let themed = Cursor::themed(&original, style, size).unwrap();
+                    assert_eq!(themed.size, Size::new(size, size));
+                    assert!(
+                        themed.hot.x >= 0.
+                            && themed.hot.x < size
+                            && themed.hot.y >= 0.
+                            && themed.hot.y < size
+                    );
+                    for pixels in themed.pixels().unwrap() {
+                        assert!(pixels[16..].chunks_exact(4).any(|p| p[3] > 240));
+                        let body: Vec<_> = pixels[16..]
+                            .chunks_exact(4)
+                            .filter(|p| p[3] > 240)
+                            .collect();
+                        let light = body
+                            .iter()
+                            .filter(|p| {
+                                p[0] as u32 + p[1] as u32 + p[2] as u32 > p[3] as u32 * 3 / 2
+                            })
+                            .count();
+                        assert_eq!(light > body.len() / 2, style == "light");
+                    }
+                }
+            }
+        });
+    }
     use objc2::rc::autoreleasepool;
     #[test]
     fn snapshot_plist_roundtrip_preserves_pixels_and_hotspot() {
