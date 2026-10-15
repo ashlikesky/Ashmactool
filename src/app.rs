@@ -332,6 +332,14 @@ impl App {
             &self.wifi_menu,
             40,
         );
+        self.add(
+            &self.menu,
+            &format!("蓝牙 · {}", self.snapshot.bluetooth.summary()),
+            Some(sel!(settings:)),
+            53,
+            false,
+            true,
+        );
         let power_title = if matches!(self.snapshot.battery, Battery::None) {
             "电源"
         } else {
@@ -528,6 +536,9 @@ pub(crate) fn refresh_system_status() {
     autoreleasepool(|_| {
         APP.with(|slot| {
             if let Some(a) = slot.borrow_mut().as_mut() {
+                if let Some(monitor) = a.monitor.as_mut() {
+                    monitor.bluetooth.sync();
+                }
                 let snapshot = Snapshot::read();
                 if snapshot != a.snapshot {
                     a.snapshot = snapshot;
@@ -537,6 +548,10 @@ pub(crate) fn refresh_system_status() {
         })
     });
     BUSY.with(|b| b.set(false));
+}
+extern "C-unwind" fn bluetooth_changed(_: &AnyObject, _: Sel, device: *mut AnyObject) {
+    crate::bluetooth::remember(device);
+    refresh_system_status();
 }
 extern "C-unwind" fn system_changed(_: &AnyObject, _: Sel, _: *mut AnyObject) {
     refresh_system_status();
@@ -570,6 +585,7 @@ extern "C-unwind" fn settings(_: &AnyObject, _: Sel, sender: *mut AnyObject) {
         let tag: isize = msg_send![sender, tag];
         let pane = match tag {
             50 => "com.apple.wifi-settings-extension",
+            53 => "com.apple.BluetoothSettings",
             51 => {
                 if matches!(a.snapshot.battery, Battery::None) {
                     "com.apple.preference.energysaver"
@@ -822,8 +838,8 @@ extern "C-unwind" fn login(_: &AnyObject, _: Sel, _: *mut AnyObject) {
 extern "C-unwind" fn about(_: &AnyObject, _: Sel, _: *mut AnyObject) {
     action(|_| {
         native::alert(
-            "Ashmactool 0.4.2",
-            "Rust 编写的原生菜单栏工具箱。\n\nWi-Fi 与电量组合图标 · 指针样式 · PNG / .cape 导入 · 保持屏幕唤醒\n\n屏幕唤醒防止闲置熄屏；合盖、手动睡眠和锁屏仍由系统处理。关闭开关或退出时释放。重启应用默认关闭。\n\n退出时恢复原始指针。系统沙滩球受接口限制以 24 帧恢复原生外观和周期，完整原始帧单独保留。\n\n私有光标接口思路来自 Alex Zielenski 的 Mousecape；参考 sdmj76 的现代版本。独立 Rust 实现采用 MIT 许可，第三方声明随包保留。\n\n部分应用自行绘制指针，可能覆盖系统主题。系统升级后可能需要兼容性更新。\n\n导入主题和原始指针备份保存在用户的 Application Support/Ashmactool 中。",
+            "Ashmactool 0.5.0",
+            "Rust 编写的原生菜单栏工具箱。\n\nWi-Fi / 电量 / 蓝牙组合图标 · 指针样式 · PNG / .cape 导入 · 保持屏幕唤醒\n\n屏幕唤醒防止闲置熄屏；合盖、手动睡眠和锁屏仍由系统处理。关闭开关或退出时释放。重启应用默认关闭。\n\n退出时恢复原始指针。系统沙滩球受接口限制以 24 帧恢复原生外观和周期，完整原始帧单独保留。\n\n私有光标接口思路来自 Alex Zielenski 的 Mousecape；参考 sdmj76 的现代版本。独立 Rust 实现采用 MIT 许可，第三方声明随包保留。\n\n部分应用自行绘制指针，可能覆盖系统主题。系统升级后可能需要兼容性更新。\n\n导入主题和原始指针备份保存在用户的 Application Support/Ashmactool 中。",
         );
         Ok(())
     });
@@ -882,6 +898,7 @@ pub fn run(smoke_test: bool) -> Result<()> {
             (sel!(quit:), quit),
             (sel!(wake:), wake),
             (sel!(systemChanged:), system_changed),
+            (sel!(bluetoothChanged:), bluetooth_changed),
             (sel!(settings:), settings),
             (sel!(menuNeedsUpdate:), menu_update),
             (sel!(menuWillOpen:), menu_open),
@@ -913,6 +930,10 @@ pub fn run(smoke_test: bool) -> Result<()> {
         builder.add_method(
             sel!(linkQualityDidChangeForWiFiInterfaceWithName:rssi:transmitRate:),
             system_status::wifi_quality as extern "C-unwind" fn(_, _, _, _, _),
+        );
+        builder.add_method(
+            sel!(bluetoothEvent:device:),
+            crate::bluetooth::device_event as extern "C-unwind" fn(_, _, _, _),
         );
         let target: Obj = msg_send![builder.register(), new];
         let app: Obj = msg_send![class!(NSApplication), sharedApplication];
@@ -983,7 +1004,7 @@ pub fn run(smoke_test: bool) -> Result<()> {
                 APP.with(|s| -> Result<()> {
                     let slot = s.borrow();
                     let a = slot.as_ref().unwrap();
-                    for tag in [40isize, 41, 52] {
+                    for tag in [40isize, 41, 52, 53] {
                         let item: Option<Obj> = msg_send![&a.menu,itemWithTag:tag];
                         if item.is_none() {
                             return Err(format!("系统菜单缺失 {tag}"));
@@ -1024,6 +1045,9 @@ pub fn run(smoke_test: bool) -> Result<()> {
                     let width:isize=msg_send![&rep,pixelsWide];
                     if width<22 {return Err("图标实际尺寸无效".into());}
                     if !a.monitor.as_ref().unwrap().warnings.is_empty() {return Err("部分系统事件订阅失败".into());}
+                    let subscriptions=a.monitor.as_ref().unwrap().bluetooth.subscriptions();
+                    if !subscriptions.0||subscriptions.2!=2 {return Err("蓝牙事件订阅不完整".into());}
+                    println!("bluetooth_connect=registered disconnect_watches={} hid_events={}",subscriptions.1,subscriptions.2);
                     println!("native_status_view=passed tracking_items_preserved=passed desktop_menu=passed wifi_events=6 power_events=registered");
                     Ok(())
                 })?;

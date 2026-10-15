@@ -16,6 +16,8 @@ const WIFI_START: f64 = 35.;
 const WIFI_END: f64 = 145.;
 const BATTERY_START: f64 = 167.;
 const BATTERY_END: f64 = 373.;
+const BOLT_GAP_START: f64 = 242.;
+const BOLT_GAP_END: f64 = 298.;
 thread_local! { static STATE: RefCell<Snapshot> = RefCell::new(Snapshot::fixture(Battery::Unavailable, WifiState::Unavailable)); }
 
 pub fn set_state(snapshot: &Snapshot) {
@@ -109,10 +111,16 @@ fn battery_arc(color: &AnyObject, end: f64, show_bolt: bool) {
     if show_bolt {
         // The charge bolt is part of the circumference, centered at 270°.
         if end > BATTERY_START {
-            arc_segment(color, BATTERY_START, end.min(246.), OUTER_RADIUS, STROKE);
+            arc_segment(
+                color,
+                BATTERY_START,
+                end.min(BOLT_GAP_START),
+                OUTER_RADIUS,
+                STROKE,
+            );
         }
-        if end > 294. {
-            arc_segment(color, 294., end, OUTER_RADIUS, STROKE);
+        if end > BOLT_GAP_END {
+            arc_segment(color, BOLT_GAP_END, end, OUTER_RADIUS, STROKE);
         }
     } else {
         arc_segment(color, BATTERY_START, end, OUTER_RADIUS, STROKE);
@@ -156,33 +164,40 @@ fn draw(s: &Snapshot, foreground: &AnyObject) -> Result<()> {
         let connected = matches!(s.wifi.state, WifiState::Connected | WifiState::Sharing);
         let strength = s.wifi.strength();
         for (radius, threshold) in [(OUTER_RADIUS, 0.9), (5., 0.5)] {
-            let color: Obj = if connected && strength >= threshold {
+            let broken = matches!(s.wifi.state, WifiState::Off | WifiState::Unavailable);
+            let color: Obj = if broken {
+                msg_send![foreground,colorWithAlphaComponent:0.45f64]
+            } else if connected && strength >= threshold {
                 Obj::retain(foreground as *const AnyObject as *mut AnyObject).unwrap()
             } else {
                 msg_send![foreground,colorWithAlphaComponent:0.27f64]
             };
-            arc_segment(&color, WIFI_START, WIFI_END, radius, STROKE);
+            if broken {
+                let segments: &[(f64, f64)] = if radius == OUTER_RADIUS {
+                    &[(35., 57.), (79., 101.), (123., 145.)]
+                } else {
+                    &[(35., 63.), (107., 145.)]
+                };
+                for &(start, end) in segments {
+                    arc_segment(&color, start, end, radius, STROKE);
+                }
+            } else {
+                arc_segment(&color, WIFI_START, WIFI_END, radius, STROKE);
+            }
         }
         let dot: Obj = msg_send![class!(NSBezierPath),bezierPathWithOvalInRect:Rect::new(Point::new(9.3,9.3),Size::new(3.4,3.4))];
-        let dot_color: Obj =
-            msg_send![foreground,colorWithAlphaComponent:if connected {1f64}else{0.27f64}];
+        let dot_color: Obj = if s.bluetooth.connected() {
+            msg_send![class!(NSColor), systemBlueColor]
+        } else {
+            msg_send![foreground,colorWithAlphaComponent:if connected {1f64}else{0.27f64}]
+        };
         let _: () = msg_send![&dot_color, setFill];
         let _: () = msg_send![&dot, fill];
-        if matches!(s.wifi.state, WifiState::Off | WifiState::Unavailable) {
-            let slash: Obj = msg_send![class!(NSBezierPath), bezierPath];
-            let _: () = msg_send![&slash,setLineWidth:1.4f64];
-            let _: () = msg_send![&slash,setLineCapStyle:1usize];
-            let _: () = msg_send![&slash,moveToPoint:Point::new(6.7,17.)];
-            let _: () = msg_send![&slash,lineToPoint:Point::new(15.3,8.4)];
-            let _: () = msg_send![foreground, setStroke];
-            let _: () = msg_send![&slash, stroke];
-        }
-
         if s.battery.show_bolt() {
             symbol(
                 "bolt.fill",
                 1.,
-                Rect::new(Point::new(8.7, 0.2), Size::new(4.6, 6.3)),
+                Rect::new(Point::new(8.2, 0.0), Size::new(5.6, 7.7)),
                 &battery_color,
             )?;
         }
@@ -228,7 +243,7 @@ fn label(text: &str, point: Point, size: f64, color: &AnyObject) {
 }
 pub fn export(directory: &Path) -> Result<()> {
     std::fs::create_dir_all(directory).map_err(|e| e.to_string())?;
-    let scenarios = [
+    let mut scenarios = vec![
         (
             "82% · 使用电池",
             Battery::Internal {
@@ -291,6 +306,37 @@ pub fn export(directory: &Path) -> Result<()> {
             WifiState::Connected,
         ),
     ];
+    scenarios.extend([
+        (
+            "Wi-Fi · 蓝牙已连接",
+            Battery::Internal {
+                percent: Some(80.),
+                charging: false,
+                external: true,
+                full: false,
+                minutes: None,
+            },
+            WifiState::Connected,
+        ),
+        (
+            "Wi-Fi 关闭 · 蓝牙已连接",
+            Battery::Internal {
+                percent: Some(64.),
+                charging: false,
+                external: false,
+                full: false,
+                minutes: None,
+            },
+            WifiState::Off,
+        ),
+    ]);
+    let snapshot_for = |index: usize, battery: &Battery, wifi: &WifiState| {
+        let mut s = Snapshot::fixture(battery.clone(), wifi.clone());
+        if index >= 7 {
+            s.bluetooth = crate::bluetooth::State::Connected;
+        }
+        s
+    };
     for (dark, name) in [(false, "light"), (true, "dark")] {
         let color = if dark {
             rgb(1., 1., 1., 1.)
@@ -298,7 +344,7 @@ pub fn export(directory: &Path) -> Result<()> {
             rgb(0.08, 0.08, 0.09, 1.)
         };
         for (i, (_, battery, wifi)) in scenarios.iter().enumerate() {
-            let snapshot = Snapshot::fixture(battery.clone(), wifi.clone());
+            let snapshot = snapshot_for(i, battery, wifi);
             for scale in [1, 2] {
                 let rep = bitmap(22, 22, scale, || draw(&snapshot, &color))?;
                 write_png(&directory.join(format!("{name}-{i}@{scale}x.png")), &rep)?;
@@ -334,7 +380,7 @@ pub fn export(directory: &Path) -> Result<()> {
             );
             for (i, (title, battery, wifi)) in scenarios.iter().enumerate() {
                 let y = height as f64 - 135. - i as f64 * 84.;
-                let s = Snapshot::fixture(battery.clone(), wifi.clone());
+                let s = snapshot_for(i, battery, wifi);
                 let _: () = msg_send![class!(NSGraphicsContext), saveGraphicsState];
                 let t: Obj = msg_send![class!(NSAffineTransform), transform];
                 let _: () = msg_send![&t,translateXBy:x+32.,yBy:y+14.];
@@ -359,9 +405,8 @@ pub fn export(directory: &Path) -> Result<()> {
 /// Read-only raster verification using the same drawing path as the live icon.
 pub fn self_test() -> Result<()> {
     let color = rgb(1., 1., 1., 1.);
-    let pixels = |battery| -> Result<Vec<u8>> {
-        let s = Snapshot::fixture(battery, WifiState::Connected);
-        let rep = bitmap(22, 22, 2, || draw(&s, &color))?;
+    let pixels_for = |s: &Snapshot| -> Result<Vec<u8>> {
+        let rep = bitmap(22, 22, 2, || draw(s, &color))?;
         unsafe {
             let row: isize = msg_send![&rep, bytesPerRow];
             let p: *const u8 = msg_send![&rep, bitmapData];
@@ -371,6 +416,7 @@ pub fn self_test() -> Result<()> {
             Ok(std::slice::from_raw_parts(p, (row * 44) as usize).to_vec())
         }
     };
+    let pixels = |battery| pixels_for(&Snapshot::fixture(battery, WifiState::Connected));
     let battery = |percent, charging| Battery::Internal {
         percent: Some(percent),
         charging,
@@ -414,8 +460,32 @@ pub fn self_test() -> Result<()> {
     {
         return Err("接电未充电的闪电形状或配色验证失败".into());
     }
+    let mut bt = Snapshot::fixture(battery(50., false), WifiState::Connected);
+    bt.bluetooth = crate::bluetooth::State::Connected;
+    let bt_pixels = pixels_for(&bt)?;
+    let blue =
+        |v: &[u8]| v[2] > v[0].saturating_add(40) && v[2] > v[1].saturating_add(20) && v[3] > 128;
+    if !bt_pixels.chunks_exact(4).any(blue) || half.chunks_exact(4).any(blue) {
+        return Err("蓝牙圆点配色验证失败".into());
+    }
+    for (index, (a, b)) in bt_pixels
+        .chunks_exact(4)
+        .zip(half.chunks_exact(4))
+        .enumerate()
+    {
+        if a != b {
+            let (x, y) = (index % 44, index / 44);
+            if !(17..=27).contains(&x) || !(17..=27).contains(&y) {
+                return Err("蓝牙颜色影响了圆点以外的区域".into());
+            }
+        }
+    }
+    bt.wifi.state = WifiState::Off;
+    if !pixels_for(&bt)?.chunks_exact(4).any(blue) {
+        return Err("Wi-Fi 关闭时蓝牙蓝点丢失".into());
+    }
     println!(
-        "battery_arc_progress=passed desktop_full_arc=passed unknown_shaded_track=passed charge_color=passed adapter_bolt=passed"
+        "battery_arc_progress=passed desktop_full_arc=passed unknown_shaded_track=passed charge_color=passed adapter_bolt=passed bluetooth_dot=passed independent_wifi_state=passed"
     );
     Ok(())
 }

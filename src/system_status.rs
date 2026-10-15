@@ -137,19 +137,22 @@ impl Wifi {
 pub struct Snapshot {
     pub wifi: Wifi,
     pub battery: Battery,
+    pub bluetooth: crate::bluetooth::State,
 }
 impl Snapshot {
     pub fn read() -> Self {
         Self {
             wifi: read_wifi(),
             battery: read_battery(),
+            bluetooth: crate::bluetooth::read(),
         }
     }
     pub fn accessibility(&self) -> String {
         format!(
-            "Ashmactool，Wi-Fi {}，{}。点击查看网络、电源与工具。",
+            "Ashmactool，Wi-Fi {}，{}，蓝牙{}。点击查看网络、电源与工具。",
             self.wifi.summary(),
-            self.battery.summary()
+            self.battery.summary(),
+            self.bluetooth.summary()
         )
     }
     pub fn fixture(battery: Battery, state: WifiState) -> Self {
@@ -163,6 +166,7 @@ impl Snapshot {
                 channel: None,
             },
             battery,
+            bluetooth: crate::bluetooth::State::NotConnected,
         }
     }
 }
@@ -314,6 +318,7 @@ pub struct Monitor {
     events: Vec<isize>,
     power_source: Ptr,
     pub warnings: Vec<String>,
+    pub bluetooth: crate::bluetooth::Monitor,
 }
 impl Monitor {
     pub fn new(target: &AnyObject) -> Self {
@@ -337,7 +342,10 @@ impl Monitor {
             } else {
                 CFRunLoopAddSource(CFRunLoopGetMain(), power_source, kCFRunLoopCommonModes);
             }
+            let bluetooth = crate::bluetooth::Monitor::new(target);
+            warnings.extend(bluetooth.warnings.iter().cloned());
             Self {
+                bluetooth,
                 client,
                 events,
                 power_source,

@@ -31,12 +31,13 @@ cat > "$app_bundle/Contents/Info.plist" <<'PLIST'
 <key>CFBundleDisplayName</key><string>Ashmactool</string>
 <key>CFBundleExecutable</key><string>ashmactool</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.4.2</string>
-<key>CFBundleVersion</key><string>7</string>
+<key>CFBundleShortVersionString</key><string>0.5.0</string>
+<key>CFBundleVersion</key><string>8</string>
 <key>CFBundleIconFile</key><string>AppIcon.icns</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSUIElement</key><true/>
 <key>NSHighResolutionCapable</key><true/>
+<key>NSBluetoothAlwaysUsageDescription</key><string>用于判断是否有蓝牙设备连接，并在菜单栏显示蓝色圆点。不扫描、不配对或连接设备，也不读取键鼠输入。</string>
 <key>NSHumanReadableCopyright</key><string>Copyright 2026 Ashmactool contributors. MIT license. Cursor API origins: Mousecape / CGSInternal. See bundled notices.</string>
 </dict></plist>
 PLIST
