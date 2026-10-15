@@ -105,8 +105,8 @@ fn arc_segment(color: &AnyObject, start: f64, end: f64, radius: f64, width: f64)
         let _: () = msg_send![&path, stroke];
     }
 }
-fn battery_arc(color: &AnyObject, end: f64, charging: bool) {
-    if charging {
+fn battery_arc(color: &AnyObject, end: f64, show_bolt: bool) {
+    if show_bolt {
         // The charge bolt is part of the circumference, centered at 270°.
         if end > BATTERY_START {
             arc_segment(color, BATTERY_START, end.min(246.), OUTER_RADIUS, STROKE);
@@ -134,7 +134,7 @@ fn symbol(name: &str, value: f64, rect: Rect, color: &AnyObject) -> Result<()> {
 fn draw(s: &Snapshot, foreground: &AnyObject) -> Result<()> {
     unsafe {
         let track: Obj = msg_send![foreground, colorWithAlphaComponent:0.22f64];
-        battery_arc(&track, BATTERY_END, s.battery.charging());
+        battery_arc(&track, BATTERY_END, s.battery.show_bolt());
         let battery_color: Obj = if s.battery.charging() {
             msg_send![class!(NSColor), systemGreenColor]
         } else if s.battery.low() {
@@ -147,7 +147,7 @@ fn draw(s: &Snapshot, foreground: &AnyObject) -> Result<()> {
                 battery_arc(
                     &battery_color,
                     BATTERY_START + (BATTERY_END - BATTERY_START) * progress,
-                    s.battery.charging(),
+                    s.battery.show_bolt(),
                 );
             }
         }
@@ -178,7 +178,7 @@ fn draw(s: &Snapshot, foreground: &AnyObject) -> Result<()> {
             let _: () = msg_send![&slash, stroke];
         }
 
-        if s.battery.charging() {
+        if s.battery.show_bolt() {
             symbol(
                 "bolt.fill",
                 1.,
@@ -279,6 +279,17 @@ pub fn export(directory: &Path) -> Result<()> {
             Battery::Unavailable,
             WifiState::Disconnected,
         ),
+        (
+            "80% · 接电未充电",
+            Battery::Internal {
+                percent: Some(80.),
+                charging: false,
+                external: true,
+                full: false,
+                minutes: None,
+            },
+            WifiState::Connected,
+        ),
     ];
     for (dark, name) in [(false, "light"), (true, "dark")] {
         let color = if dark {
@@ -294,7 +305,8 @@ pub fn export(directory: &Path) -> Result<()> {
             }
         }
     }
-    let board = bitmap(760, 600, 2, || unsafe {
+    let height = 96 + scenarios.len() * 84;
+    let board = bitmap(760, height, 2, || unsafe {
         for (column, dark) in [false, true].into_iter().enumerate() {
             let bg = if dark {
                 rgb(0.09, 0.10, 0.12, 1.)
@@ -307,7 +319,7 @@ pub fn export(directory: &Path) -> Result<()> {
                 rgb(0.10, 0.11, 0.13, 1.)
             };
             let x = column as f64 * 380.;
-            let path: Obj = msg_send![class!(NSBezierPath),bezierPathWithRect:Rect::new(Point::new(x,0.),Size::new(380.,600.))];
+            let path: Obj = msg_send![class!(NSBezierPath),bezierPathWithRect:Rect::new(Point::new(x,0.),Size::new(380.,height as f64))];
             let _: () = msg_send![&bg, setFill];
             let _: () = msg_send![&path, fill];
             label(
@@ -316,12 +328,12 @@ pub fn export(directory: &Path) -> Result<()> {
                 } else {
                     "浅色菜单栏"
                 },
-                Point::new(x + 28., 550.),
+                Point::new(x + 28., height as f64 - 50.),
                 18.,
                 &fg,
             );
             for (i, (title, battery, wifi)) in scenarios.iter().enumerate() {
-                let y = 465. - i as f64 * 84.;
+                let y = height as f64 - 135. - i as f64 * 84.;
                 let s = Snapshot::fixture(battery.clone(), wifi.clone());
                 let _: () = msg_send![class!(NSGraphicsContext), saveGraphicsState];
                 let t: Obj = msg_send![class!(NSAffineTransform), transform];
@@ -386,8 +398,24 @@ pub fn self_test() -> Result<()> {
     if !charging.chunks_exact(4).any(green) || half.chunks_exact(4).any(green) {
         return Err("充电绿色状态验证失败".into());
     }
+    let plugged = pixels(Battery::Internal {
+        percent: Some(50.),
+        charging: false,
+        external: true,
+        full: false,
+        minutes: None,
+    })?;
+    if plugged == half
+        || plugged.chunks_exact(4).any(green)
+        || !plugged
+            .chunks_exact(4)
+            .zip(charging.chunks_exact(4))
+            .all(|(a, b)| a[3] == b[3])
+    {
+        return Err("接电未充电的闪电形状或配色验证失败".into());
+    }
     println!(
-        "battery_arc_progress=passed desktop_full_arc=passed unknown_shaded_track=passed charge_color=passed"
+        "battery_arc_progress=passed desktop_full_arc=passed unknown_shaded_track=passed charge_color=passed adapter_bolt=passed"
     );
     Ok(())
 }

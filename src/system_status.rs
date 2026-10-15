@@ -56,6 +56,12 @@ impl Battery {
     pub fn charging(&self) -> bool {
         matches!(self, Self::Internal { charging: true, .. })
     }
+    pub fn show_bolt(&self) -> bool {
+        matches!(
+            self,
+            Self::Internal { external: true, .. } | Self::Internal { charging: true, .. }
+        )
+    }
     pub fn low(&self) -> bool {
         matches!(self, Self::Internal { percent: Some(p), external: false, charging: false, .. } if *p <= 20.)
     }
@@ -423,6 +429,8 @@ mod tests {
             minutes: None,
         };
         assert_eq!(b.progress(), Some(0.));
+        assert!(!b.show_bolt());
+        assert!(!Battery::None.show_bolt());
         assert!(b.low());
         assert!(!b.charging());
         let b = Battery::Internal {
@@ -433,6 +441,7 @@ mod tests {
             minutes: None,
         };
         assert!(!b.charging());
+        assert!(b.show_bolt());
         assert!(b.summary().contains("未充电"));
     }
 }
