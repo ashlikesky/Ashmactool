@@ -10,6 +10,12 @@ use objc2::{
 };
 use objc2_core_foundation::{CGPoint as Point, CGRect as Rect, CGSize as Size};
 use std::{cell::RefCell, path::Path, sync::OnceLock};
+const OUTER_RADIUS: f64 = 8.;
+const STROKE: f64 = 1.7;
+const WIFI_START: f64 = 35.;
+const WIFI_END: f64 = 145.;
+const BATTERY_START: f64 = 167.;
+const BATTERY_END: f64 = 373.;
 thread_local! { static STATE: RefCell<Snapshot> = RefCell::new(Snapshot::fixture(Battery::Unavailable, WifiState::Unavailable)); }
 
 pub fn set_state(snapshot: &Snapshot) {
@@ -102,14 +108,14 @@ fn arc_segment(color: &AnyObject, start: f64, end: f64, radius: f64, width: f64)
 fn battery_arc(color: &AnyObject, end: f64, charging: bool) {
     if charging {
         // The charge bolt is part of the circumference, centered at 270°.
-        if end > 151. {
-            arc_segment(color, 151., end.min(254.), 9., 1.7);
+        if end > BATTERY_START {
+            arc_segment(color, BATTERY_START, end.min(246.), OUTER_RADIUS, STROKE);
         }
-        if end > 286. {
-            arc_segment(color, 286., end, 9., 1.7);
+        if end > 294. {
+            arc_segment(color, 294., end, OUTER_RADIUS, STROKE);
         }
     } else {
-        arc_segment(color, 151., end, 9., 1.7);
+        arc_segment(color, BATTERY_START, end, OUTER_RADIUS, STROKE);
     }
 }
 fn symbol(name: &str, value: f64, rect: Rect, color: &AnyObject) -> Result<()> {
@@ -128,7 +134,7 @@ fn symbol(name: &str, value: f64, rect: Rect, color: &AnyObject) -> Result<()> {
 fn draw(s: &Snapshot, foreground: &AnyObject) -> Result<()> {
     unsafe {
         let track: Obj = msg_send![foreground, colorWithAlphaComponent:0.22f64];
-        battery_arc(&track, 389., s.battery.charging());
+        battery_arc(&track, BATTERY_END, s.battery.charging());
         let battery_color: Obj = if s.battery.charging() {
             msg_send![class!(NSColor), systemGreenColor]
         } else if s.battery.low() {
@@ -138,32 +144,26 @@ fn draw(s: &Snapshot, foreground: &AnyObject) -> Result<()> {
         };
         if let Some(progress) = s.battery.progress() {
             if progress > 0. {
-                battery_arc(&battery_color, 151. + 238. * progress, s.battery.charging());
-            }
-        } else {
-            // Unknown is deliberately distinct from a full desktop indicator.
-            for start in if s.battery.charging() {
-                [151f64, 213., 300., 359.]
-            } else {
-                [151f64, 213., 275., 337.]
-            } {
-                arc_segment(foreground, start, start + 20., 9., 1.7);
+                battery_arc(
+                    &battery_color,
+                    BATTERY_START + (BATTERY_END - BATTERY_START) * progress,
+                    s.battery.charging(),
+                );
             }
         }
-        // The Wi-Fi outer band and battery progress share exactly the same
-        // circle (11,11), radius 9, and stroke width. 16-degree side breaks
-        // preserve the Wi-Fi silhouette without splitting it into a second U.
+        // Unknown charge leaves only the continuous shaded track, without
+        // bright segments. Wi-Fi and battery still share one circular edge.
         let connected = matches!(s.wifi.state, WifiState::Connected | WifiState::Sharing);
         let strength = s.wifi.strength();
-        for (radius, threshold) in [(9., 0.9), (5.4, 0.5)] {
+        for (radius, threshold) in [(OUTER_RADIUS, 0.9), (5., 0.5)] {
             let color: Obj = if connected && strength >= threshold {
                 Obj::retain(foreground as *const AnyObject as *mut AnyObject).unwrap()
             } else {
                 msg_send![foreground,colorWithAlphaComponent:0.27f64]
             };
-            arc_segment(&color, 45., 135., radius, 1.7);
+            arc_segment(&color, WIFI_START, WIFI_END, radius, STROKE);
         }
-        let dot: Obj = msg_send![class!(NSBezierPath),bezierPathWithOvalInRect:Rect::new(Point::new(9.45,9.45),Size::new(3.1,3.1))];
+        let dot: Obj = msg_send![class!(NSBezierPath),bezierPathWithOvalInRect:Rect::new(Point::new(9.3,9.3),Size::new(3.4,3.4))];
         let dot_color: Obj =
             msg_send![foreground,colorWithAlphaComponent:if connected {1f64}else{0.27f64}];
         let _: () = msg_send![&dot_color, setFill];
@@ -182,7 +182,7 @@ fn draw(s: &Snapshot, foreground: &AnyObject) -> Result<()> {
             symbol(
                 "bolt.fill",
                 1.,
-                Rect::new(Point::new(9.3, 0.1), Size::new(3.4, 4.9)),
+                Rect::new(Point::new(8.7, 0.2), Size::new(4.6, 6.3)),
                 &battery_color,
             )?;
         }
@@ -376,6 +376,7 @@ pub fn self_test() -> Result<()> {
     if !(solid(&empty) < solid(&half) && solid(&half) < solid(&full))
         || full != desktop
         || unknown == desktop
+        || unknown != empty
     {
         return Err("电量进度或无电池/未知状态绘制验证失败".into());
     }
@@ -386,7 +387,7 @@ pub fn self_test() -> Result<()> {
         return Err("充电绿色状态验证失败".into());
     }
     println!(
-        "battery_arc_progress=passed desktop_full_arc=passed unknown_distinct=passed charge_color=passed"
+        "battery_arc_progress=passed desktop_full_arc=passed unknown_shaded_track=passed charge_color=passed"
     );
     Ok(())
 }
