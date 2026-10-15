@@ -284,6 +284,8 @@ impl Api {
             } // Hidden stays hidden.
             if arrows.contains(&n) || n == "com.apple.cursor.0" {
                 entries.insert(n, Cursor::preset(style, size)?);
+            } else if let Some(kind) = geometric_kind(&n) {
+                entries.insert(n, Cursor::geometric(style, size, kind)?);
             } else if n == "com.apple.cursor.7" || n == "com.apple.cursor.8" {
                 let images = native::array();
                 for scale in [1, 2] {
@@ -330,6 +332,24 @@ impl Api {
     }
 }
 
+fn geometric_kind(name: &str) -> Option<graphics::GeometricCursor> {
+    use graphics::GeometricCursor as K;
+    Some(match name {
+        "com.apple.cursor.1"
+        | "com.apple.coregraphics.IBeam"
+        | "com.apple.coregraphics.IBeamS"
+        | "com.apple.coregraphics.IBeamXOR" => K::Text,
+        "com.apple.cursor.26" => K::VerticalText,
+        "com.apple.cursor.11" | "com.apple.coregraphics.ClosedHand" => K::Grip,
+        "com.apple.cursor.12" | "com.apple.coregraphics.OpenHand" => K::OpenHand,
+        "com.apple.cursor.13" | "com.apple.coregraphics.PointingHand" => K::Link,
+        "com.apple.cursor.17" | "com.apple.cursor.38" => K::HorizontalLeft,
+        "com.apple.cursor.18" | "com.apple.cursor.27" => K::HorizontalRight,
+        "com.apple.cursor.19" | "com.apple.cursor.28" => K::HorizontalBoth,
+        _ => return None,
+    })
+}
+
 pub struct Cursor {
     pub size: Size,
     pub hot: Point,
@@ -366,25 +386,21 @@ impl Cursor {
         }
         let source = Image(unsafe { CGImageRetain((&*last as *const AnyObject).cast()) });
         let frames = original.frames.min(24);
+        let (layout, source_hot) = graphics::cursor_layout(
+            &source.pixels()?,
+            original.size,
+            original.hot,
+            original.frames,
+        )?;
         let images = native::array();
         for scale in [1, 2] {
-            let img = graphics::themed_sprite(
-                &source,
-                original.size,
-                original.frames,
-                frames,
-                style,
-                scale,
-            )?;
+            let img =
+                graphics::themed_sprite(&source, layout, original.frames, frames, style, scale)?;
             unsafe {
                 native::append(&images, &*img.0.cast::<AnyObject>());
             }
         }
-        let ratio = 40. / original.size.width.max(original.size.height);
-        let hot = Point::new(
-            ((64. - original.size.width * ratio) / 2. + original.hot.x * ratio) * points / 64.,
-            ((64. - original.size.height * ratio) / 2. + original.hot.y * ratio) * points / 64.,
-        );
+        let hot = Point::new(source_hot.x * points / 64., source_hot.y * points / 64.);
         let out = Self {
             size: Size::new(points, points),
             hot,
@@ -394,6 +410,25 @@ impl Cursor {
             } else {
                 0.
             },
+            images,
+        };
+        graphics::validate(out.size, out.hot, out.frames, out.duration)?;
+        Ok(out)
+    }
+    fn geometric(style: &str, points: f64, kind: graphics::GeometricCursor) -> Result<Self> {
+        let images = native::array();
+        for scale in [1, 2] {
+            let image = graphics::geometric_cursor(style, scale, kind)?;
+            unsafe {
+                native::append(&images, &*image.0.cast::<AnyObject>());
+            }
+        }
+        let hot = kind.hotspot();
+        let out = Self {
+            size: Size::new(points, points),
+            hot: Point::new(hot.x * points / 64., hot.y * points / 64.),
+            frames: 1,
+            duration: 0.,
             images,
         };
         graphics::validate(out.size, out.hot, out.frames, out.duration)?;
@@ -539,10 +574,13 @@ pub fn theme(path: &Path) -> Result<BTreeMap<String, Cursor>> {
 }
 fn read_theme(path: &Path, backup: bool) -> Result<BTreeMap<String, Cursor>> {
     let root = native::read_plist(path)?;
-    if !native::kind(&root, c"NSDictionary") {
+    decode_theme(&root, backup)
+}
+fn decode_theme(root: &AnyObject, backup: bool) -> Result<BTreeMap<String, Cursor>> {
+    if !native::kind(root, c"NSDictionary") {
         return Err("主题根节点必须是字典".into());
     }
-    let entries = native::get(&root, "Cursors").ok_or("主题中没有 Cursors")?;
+    let entries = native::get(root, "Cursors").ok_or("主题中没有 Cursors")?;
     if !native::kind(&entries, c"NSDictionary") {
         return Err("Cursors 必须是字典".into());
     }
@@ -582,7 +620,9 @@ fn native_wait(name: &str) -> bool {
 pub struct Engine {
     pub api: Api,
     backups: BTreeMap<String, Cursor>,
-    active: BTreeMap<String, Cursor>,
+    // Preserve an independent lossless recovery copy without decoded rasters.
+    backup_archive: Option<Obj>,
+    active: BTreeMap<String, Obj>,
     backup_path: PathBuf,
     pub error: Option<String>,
     pub skipped: Vec<String>,
@@ -590,33 +630,40 @@ pub struct Engine {
 impl Engine {
     pub fn new(backup_path: PathBuf) -> Result<Self> {
         let api = Api::load()?;
-        let backups = if backup_path.exists() {
-            read_theme(&backup_path, true)?
-        } else {
-            BTreeMap::new()
-        };
+        // Recovery data is durable on disk; decode only when restoration needs it.
+        let backups = BTreeMap::new();
         Ok(Self {
             api,
             backups,
+            backup_archive: None,
             active: BTreeMap::new(),
             backup_path,
             error: None,
             skipped: Vec::new(),
         })
     }
-    fn persist_backup(&self) -> Result<()> {
+    fn persist_backup(&mut self) -> Result<()> {
         let root = native::dictionary();
         let entries = native::dictionary();
         for (name, c) in &self.backups {
-            native::insert(&entries, name, &*c.plist()?);
+            native::insert(&entries, name, &*objc2::rc::autoreleasepool(|_| c.plist())?);
         }
         native::insert(&root, "Cursors", &entries);
-        native::write_plist(&self.backup_path, &root)
+        native::write_plist(&self.backup_path, &root)?;
+        self.backup_archive = Some(root);
+        Ok(())
     }
     pub fn apply(&mut self, mut desired: BTreeMap<String, Cursor>) -> Result<()> {
         // Fully prepare and validate before restoring or touching global state.
         for c in desired.values() {
             graphics::validate(c.size, c.hot, c.frames, c.duration)?;
+        }
+        let mut encoded = BTreeMap::new();
+        for (name, cursor) in &desired {
+            encoded.insert(
+                name.clone(),
+                objc2::rc::autoreleasepool(|_| cursor.plist())?,
+            );
         }
         self.restore()?;
         let mut missing = vec![];
@@ -648,7 +695,9 @@ impl Engine {
             ));
         }
         self.persist_backup()?;
-        self.active = desired;
+        encoded.retain(|name, _| desired.contains_key(name));
+        self.active = encoded;
+        drop(desired);
         if let Err(e) = self.reapply() {
             let rollback = self.restore();
             return Err(format!(
@@ -664,6 +713,9 @@ impl Engine {
         if let Some(name) = self.active.keys().find(|n| n.contains("Arrow")) {
             self.api.refresh(name);
         }
+        // The file has been persisted before registration. Keep it for recovery
+        // without retaining the original decoded sprites for the whole session.
+        self.backups.clear();
         self.error = None;
         Ok(())
     }
@@ -679,8 +731,12 @@ impl Engine {
         self.apply(entries)
     }
     pub fn reapply(&mut self) -> Result<()> {
-        for (name, c) in &self.active {
-            if let Err(e) = self.api.register(name, c) {
+        for (name, encoded) in &self.active {
+            let result = objc2::rc::autoreleasepool(|_| {
+                let cursor = Cursor::from_plist(encoded)?;
+                self.api.register(name, &cursor)
+            });
+            if let Err(e) = result {
                 self.error = Some(e.clone());
                 return Err(e);
             }
@@ -693,6 +749,13 @@ impl Engine {
     pub fn restore(&mut self) -> Result<()> {
         // Stop event-driven reapplication even if restoration itself needs a retry.
         self.active.clear();
+        if self.backups.is_empty() {
+            if let Some(archive) = &self.backup_archive {
+                self.backups = decode_theme(archive, true)?;
+            } else if self.backup_path.exists() {
+                self.backups = read_theme(&self.backup_path, true)?;
+            }
+        }
         let mut failures = vec![];
         if self.backups.values().any(|c| c.frames > 24) {
             let archive = self.backup_path.with_file_name("native-original.cape");
@@ -747,6 +810,7 @@ impl Engine {
                 .map_err(|e| format!("已恢复，但备份清理失败：{e}"))?;
         }
         self.backups.clear();
+        self.backup_archive = None;
         self.error = None;
         Ok(())
     }
@@ -754,7 +818,8 @@ impl Engine {
         self.active.len()
     }
     pub fn verify_active(&self) -> Result<()> {
-        for (name, expected) in &self.active {
+        for (name, encoded) in &self.active {
+            let expected = Cursor::from_plist(encoded)?;
             let actual = self.api.snapshot(name)?;
             if (actual.size.width - expected.size.width).abs() > 0.0001
                 || (actual.size.height - expected.size.height).abs() > 0.0001
@@ -830,6 +895,45 @@ mod tests {
         });
     }
     #[test]
+    fn geometric_symbols_keep_contrast_hotspots_and_lossless_cache() {
+        use graphics::GeometricCursor as K;
+        objc2::rc::autoreleasepool(|_| {
+            for style in ["glow", "dark", "light"] {
+                for size in [28., 35., 45.5, 56.] {
+                    for kind in [
+                        K::Text,
+                        K::VerticalText,
+                        K::Link,
+                        K::Grip,
+                        K::OpenHand,
+                        K::HorizontalLeft,
+                        K::HorizontalRight,
+                        K::HorizontalBoth,
+                    ] {
+                        let cursor = Cursor::geometric(style, size, kind).unwrap();
+                        let encoded = objc2::rc::autoreleasepool(|_| cursor.plist().unwrap());
+                        let decoded = Cursor::from_plist(&encoded).unwrap();
+                        assert_eq!(cursor.hot, decoded.hot);
+                        assert_eq!(cursor.pixels().unwrap(), decoded.pixels().unwrap());
+                        for pixels in cursor.pixels().unwrap() {
+                            let body = &pixels[16..];
+                            assert!(body.chunks_exact(4).any(|p| p[3] > 200 && p[0] < 80));
+                            assert!(body.chunks_exact(4).any(|p| p[3] > 200 && p[0] > 200));
+                            let w = u64::from_le_bytes(pixels[..8].try_into().unwrap()) as usize;
+                            let hot = kind.hotspot();
+                            let x = (hot.x * w as f64 / 64.) as usize;
+                            let y = (hot.y * w as f64 / 64.) as usize;
+                            assert!(
+                                body[(y * w + x) * 4 + 3] > 0,
+                                "hotspot outside visible symbol"
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    }
+    #[test]
     fn complete_themes_preserve_animation_and_valid_hotspots_at_all_sizes() {
         objc2::rc::autoreleasepool(|_| {
             let original = Cursor::preset("light", 64.).unwrap();
@@ -837,6 +941,12 @@ mod tests {
                 for size in [28., 35., 45.5, 56.] {
                     let themed = Cursor::themed(&original, style, size).unwrap();
                     assert_eq!(themed.size, Size::new(size, size));
+                    let encoded = objc2::rc::autoreleasepool(|_| themed.plist().unwrap());
+                    let decoded = Cursor::from_plist(&encoded).unwrap();
+                    assert_eq!(decoded.pixels().unwrap(), themed.pixels().unwrap());
+                    assert_eq!(decoded.hot, themed.hot);
+                    assert_eq!(decoded.frames, themed.frames);
+                    assert_eq!(decoded.duration, themed.duration);
                     assert!(
                         themed.hot.x >= 0.
                             && themed.hot.x < size

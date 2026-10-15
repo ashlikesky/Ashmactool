@@ -562,7 +562,9 @@ pub(crate) fn refresh_system_status() {
                 let snapshot = Snapshot::read();
                 if snapshot != a.snapshot {
                     a.snapshot = snapshot;
-                    a.rebuild();
+                    // Menus are rebuilt on menuNeedsUpdate, immediately before
+                    // opening. Background RSSI/power events only need the mark.
+                    a.update_status_icon();
                 }
             }
         })
@@ -709,7 +711,7 @@ fn background_refresh() {
         APP.with(|slot| {
             if let Some(a) = slot.borrow_mut().as_mut() {
                 a.last_error = a.engine.reapply().err();
-                a.rebuild();
+                a.update_status_icon();
             }
         });
     });
@@ -867,7 +869,7 @@ extern "C-unwind" fn login(_: &AnyObject, _: Sel, _: *mut AnyObject) {
 extern "C-unwind" fn about(_: &AnyObject, _: Sel, _: *mut AnyObject) {
     action(|_| {
         native::alert(
-            "Ashmactool 0.5.2",
+            "Ashmactool 0.5.3",
             "Rust 编写的原生菜单栏工具箱。\n\nWi-Fi / 电量 / 蓝牙组合图标 · 指针样式 · PNG / .cape 导入 · 保持屏幕唤醒\n\n屏幕唤醒防止闲置熄屏；合盖、手动睡眠和锁屏仍由系统处理。关闭开关或退出时释放。重启应用默认关闭。\n\n退出时恢复原始指针。系统沙滩球受接口限制以 24 帧恢复原生外观和周期，完整原始帧单独保留。\n\n私有光标接口思路来自 Alex Zielenski 的 Mousecape；参考 sdmj76 的现代版本。独立 Rust 实现采用 MIT 许可，第三方声明随包保留。\n\n部分应用自行绘制指针，可能覆盖系统主题。系统升级后可能需要兼容性更新。\n\n导入主题和原始指针备份保存在用户的 Application Support/Ashmactool 中。",
         );
         Ok(())
@@ -902,7 +904,9 @@ extern "C-unwind" fn will_terminate(_: &AnyObject, _: Sel, _: *mut AnyObject) {
 }
 
 pub fn run(smoke_test: bool) -> Result<()> {
-    autoreleasepool(|_| unsafe {
+    // Keep only explicitly retained app state across the event loop. Cursor
+    // decoding/registration and plist parsing create sizeable temporary objects.
+    let (app, statusbar, target, settings_path, saved_settings) = autoreleasepool(|_| unsafe {
         let settings_path = native::support()?.join("settings.plist");
         let saved_settings = if smoke_test && settings_path.exists() {
             Some(std::fs::read(&settings_path).map_err(|e| e.to_string())?)
@@ -1024,6 +1028,11 @@ pub fn run(smoke_test: bool) -> Result<()> {
         }
         let center: Obj = msg_send![class!(NSNotificationCenter), defaultCenter];
         let _: () = msg_send![&center,addObserver:&*target,selector:sel!(wake:),name:&*native::string("NSApplicationDidChangeScreenParametersNotification"),object:std::ptr::null::<AnyObject>()];
+        Ok::<_, String>((app, statusbar, target, settings_path, saved_settings))
+    })?;
+    // Native smoke actions run after the startup pool drains as well, checking
+    // that the menu, cursor images and notification targets remain owned.
+    autoreleasepool(|_| unsafe {
         if smoke_test {
             // Exercise the same native menu selector dispatch as a user click,
             // without driving other applications or changing login settings.

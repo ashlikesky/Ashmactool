@@ -4,7 +4,7 @@
 
 <img src="assets/AppIcon.png" width="160" alt="Ashmactool 图标">
 
-Rust 编写的 macOS 菜单栏小工具箱。原生 AppKit 界面、单进程、没有 WebView，空闲时通过系统事件响应变化。
+Rust 编写的 macOS 菜单栏小工具箱。原生 AppKit 界面、单进程、没有 WebView，空闲时通过系统事件响应变化。指针缓存使用无损 PNG，重新应用或恢复时才解码；后台状态变化只刷新图标，菜单打开前更新内容。
 
 ## 工具
 
@@ -57,7 +57,9 @@ Rust 编写的 macOS 菜单栏小工具箱。原生 AppKit 界面、单进程、
 
 保留各状态原本的形状、内部细节、热点和动画周期，统一黑白配色和柔光效果。隐藏指针保持隐藏。PNG 导入用于自定义箭头；整套主题和 `.cape` 可以覆盖多种状态。部分应用自行绘制或临时创建的指针可能不使用系统定义。
 
-[查看三套主题的状态预览](previews/states.png)。预览展示首帧，实际忙碌和计数状态仍有动画。
+普通箭头保持原大小。文本插入、链接手形、张手/抓握和水平调整采用极简几何轮廓，覆盖竖排文本及单向/双向水平调整；细线通过反色边缘保持明暗背景可读。其他状态按实际可见轮廓统一视觉尺寸，动画各帧共用比例，热点同步变换。
+
+[查看极简几何造型](previews/cursor-minimal-direction.png)。[查看尺寸修复前后对比](previews/cursor-size-comparison.png)。[查看三套主题的状态预览](previews/states.png)。预览展示首帧，实际忙碌和计数状态仍有动画。
 
 ## 主题与恢复
 
@@ -110,7 +112,7 @@ cargo run --locked -- --ui-smoke-test
 - `status_icon.rs`：同圆的 Wi-Fi / 电量图标、外观适配和状态预览。
 - `system_status.rs`：只读系统快照、Wi-Fi 事件和电源通知订阅。
 - `bluetooth.rs`：蓝牙连接元数据及连接/断开、HID 服务通知。
-- `cursor.rs` / `graphics.rs`：指针注册、备份恢复和图像。
+- `cursor.rs` / `graphics.rs` / `geometric_paths.rs`：指针注册、压缩缓存、备份恢复和原生几何图形。
 - `power.rs`：进程持有的 IOKit 电源请求，创建、回读和释放。
 - `native.rs`：原生对象和 plist 文件操作。
 

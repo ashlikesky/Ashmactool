@@ -35,6 +35,10 @@ unsafe extern "C" {
     pub fn CGImageGetHeight(image: Ptr) -> usize;
     fn CGContextScaleCTM(ctx: Ptr, x: f64, y: f64);
     fn CGContextTranslateCTM(ctx: Ptr, x: f64, y: f64);
+    fn CGContextRotateCTM(ctx: Ptr, angle: f64);
+    fn CGContextSaveGState(ctx: Ptr);
+    fn CGContextRestoreGState(ctx: Ptr);
+    fn CGContextClipToRect(ctx: Ptr, rect: Rect);
     fn CGContextSetRGBFillColor(ctx: Ptr, r: f64, g: f64, b: f64, a: f64);
     fn CGContextSetRGBStrokeColor(ctx: Ptr, r: f64, g: f64, b: f64, a: f64);
     fn CGContextSetLineWidth(ctx: Ptr, width: f64);
@@ -209,12 +213,157 @@ pub fn crosshair(style: &str, scale: usize, thin: bool) -> Result<Image> {
     })
 }
 
+include!("geometric_paths.rs");
+
+fn geometric_path(ctx: Ptr, segments: &[Segment]) {
+    unsafe {
+        for segment in segments {
+            match *segment {
+                Segment::Move(x, y) => CGContextMoveToPoint(ctx, x, y),
+                Segment::Line(x, y) => CGContextAddLineToPoint(ctx, x, y),
+                Segment::Curve(a, b, c, d, x, y) => CGContextAddCurveToPoint(ctx, a, b, c, d, x, y),
+                Segment::Close => CGContextClosePath(ctx),
+            }
+        }
+    }
+}
+
+/// Flat paths; contrast under-strokes keep thin symbols legible on both backgrounds.
+pub fn geometric_cursor(style: &str, scale: usize, kind: GeometricCursor) -> Result<Image> {
+    bitmap(64 * scale, 64 * scale, |ctx| unsafe {
+        CGContextTranslateCTM(ctx, 0., (64 * scale) as f64);
+        CGContextScaleCTM(ctx, scale as f64, -(scale as f64));
+        if matches!(kind, GeometricCursor::VerticalText) {
+            CGContextTranslateCTM(ctx, 32., 32.);
+            CGContextRotateCTM(ctx, std::f64::consts::FRAC_PI_2);
+            CGContextTranslateCTM(ctx, -32., -32.);
+        }
+        CGContextSetLineJoin(ctx, 1);
+        CGContextSetLineCap(ctx, 1);
+        let light = style == "light";
+        let outline = if light { 0.08 } else { 1. };
+        let fill = if light { 1. } else { 0.02 };
+        let ink = if style == "glow" { 1. } else { 0.02 };
+        let contrast = if style == "glow" { 0.02 } else { 1. };
+        let draw = |alpha: f64| {
+            if kind.filled() {
+                CGContextSetRGBFillColor(ctx, fill, fill, fill, alpha);
+                CGContextSetRGBStrokeColor(ctx, outline, outline, outline, alpha);
+                CGContextSetLineWidth(ctx, 2.);
+                geometric_path(ctx, kind.path());
+                CGContextDrawPath(ctx, 3);
+            } else {
+                for (tone, width) in [(contrast, 4.), (ink, 2.)] {
+                    CGContextSetRGBStrokeColor(ctx, tone, tone, tone, alpha);
+                    CGContextSetLineWidth(ctx, width);
+                    geometric_path(ctx, kind.path());
+                    CGContextDrawPath(ctx, 2);
+                }
+            }
+        };
+        let inactive = match kind {
+            GeometricCursor::HorizontalLeft => Some(32.),
+            GeometricCursor::HorizontalRight => Some(0.),
+            _ => None,
+        };
+        if let Some(inactive) = inactive {
+            for x in [0., 32.] {
+                CGContextSaveGState(ctx);
+                CGContextClipToRect(ctx, Rect::new(Point::new(x, 0.), Size::new(32., 64.)));
+                draw(if x == inactive { 0.28 } else { 1. });
+                CGContextRestoreGState(ctx);
+            }
+        } else {
+            draw(1.);
+        }
+        if matches!(kind, GeometricCursor::Grip) {
+            CGContextSetRGBStrokeColor(ctx, outline, outline, outline, 1.);
+            CGContextSetLineWidth(ctx, 1.25);
+            geometric_path(ctx, GRIP_DETAILS);
+            CGContextDrawPath(ctx, 2);
+        }
+    })
+}
+
+/// Fit opaque ink, rather than transparent source padding, to the ordinary
+/// arrow's 35.5-point silhouette on the shared 64-point canvas. All animation
+/// frames share one transform. The hotspot follows that exact same transform.
+pub fn cursor_layout(
+    pixels: &[u8],
+    logical: Size,
+    hot: Point,
+    frames: usize,
+) -> Result<(Rect, Point)> {
+    if pixels.len() < 16
+        || frames == 0
+        || ![logical.width, logical.height, hot.x, hot.y]
+            .iter()
+            .all(|v| v.is_finite())
+        || logical.width <= 0.
+        || logical.height <= 0.
+    {
+        return Err("指针布局缺少像素".into());
+    }
+    let width = u64::from_le_bytes(pixels[..8].try_into().unwrap()) as usize;
+    let height = u64::from_le_bytes(pixels[8..16].try_into().unwrap()) as usize;
+    if width == 0
+        || height == 0
+        || height % frames != 0
+        || width
+            .checked_mul(height)
+            .and_then(|n| n.checked_mul(4))
+            .and_then(|n| n.checked_add(16))
+            != Some(pixels.len())
+    {
+        return Err("指针布局像素尺寸无效".into());
+    }
+    let frame_height = height / frames;
+    let mut bounds = (width, frame_height, 0, 0);
+    for (index, pixel) in pixels[16..].chunks_exact(4).enumerate() {
+        // Ignore native shadows so transparent padding and glow cannot decide size.
+        if pixel[3] >= 128 {
+            let x = index % width;
+            let y = (index / width) % frame_height;
+            bounds.0 = bounds.0.min(x);
+            bounds.1 = bounds.1.min(y);
+            bounds.2 = bounds.2.max(x + 1);
+            bounds.3 = bounds.3.max(y + 1);
+        }
+    }
+    if bounds.2 == 0 || bounds.3 == 0 {
+        bounds = (0, 0, width, frame_height);
+    }
+    let center = Point::new(
+        (bounds.0 + bounds.2) as f64 / 2.,
+        (bounds.1 + bounds.3) as f64 / 2.,
+    );
+    let source_hot = Point::new(
+        hot.x * width as f64 / logical.width,
+        hot.y * frame_height as f64 / logical.height,
+    );
+    let mut factor = 35.5 / (bounds.2 - bounds.0).max(bounds.3 - bounds.1) as f64;
+    // Preserve unusual native hotspots outside the ink without clamping them.
+    for distance in [
+        (source_hot.x - center.x).abs(),
+        (source_hot.y - center.y).abs(),
+    ] {
+        if distance > 0. {
+            factor = factor.min(31. / distance);
+        }
+    }
+    let top = Point::new(32. - center.x * factor, 32. - center.y * factor);
+    let size = Size::new(width as f64 * factor, frame_height as f64 * factor);
+    let rect = Rect::new(Point::new(top.x, 64. - top.y - size.height), size);
+    let transformed_hot = Point::new(top.x + source_hot.x * factor, top.y + source_hot.y * factor);
+    Ok((rect, transformed_hot))
+}
+
 /// Keep each native silhouette and its internal detail, with a common palette
 /// and canvas. Sprite frames are cropped separately so shadows cannot bleed
 /// between frames. CoreGraphics, rather than a polling timer, animates them.
 pub fn themed_sprite(
     original: &Image,
-    logical: Size,
+    layout: Rect,
     native_frames: usize,
     frames: usize,
     style: &str,
@@ -252,8 +401,6 @@ pub fn themed_sprite(
             width * height * 4,
         );
     })?;
-    let ratio = 40. / logical.width.max(logical.height);
-    let target = Size::new(logical.width * ratio, logical.height * ratio);
     let side = 64 * scale;
     bitmap(side, side * frames, |ctx| unsafe {
         CGContextScaleCTM(ctx, scale as f64, scale as f64);
@@ -280,10 +427,10 @@ pub fn themed_sprite(
                     ctx,
                     Rect::new(
                         Point::new(
-                            (64. - target.width) / 2.,
-                            (frames - i - 1) as f64 * 64. + (64. - target.height) / 2.,
+                            layout.origin.x,
+                            (frames - i - 1) as f64 * 64. + layout.origin.y,
                         ),
-                        target,
+                        layout.size,
                     ),
                     image.0,
                 );
@@ -366,6 +513,53 @@ pub fn validate_with_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn fixture(
+        width: usize,
+        frame_height: usize,
+        frames: usize,
+        shapes: &[(usize, usize, usize, usize, usize)],
+    ) -> Vec<u8> {
+        let mut pixels = vec![0; 16 + width * frame_height * frames * 4];
+        pixels[..8].copy_from_slice(&(width as u64).to_le_bytes());
+        pixels[8..16].copy_from_slice(&((frame_height * frames) as u64).to_le_bytes());
+        for &(frame, x0, y0, x1, y1) in shapes {
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let offset = 16 + ((frame * frame_height + y) * width + x) * 4;
+                    pixels[offset..offset + 4].fill(255);
+                }
+            }
+        }
+        pixels
+    }
+    #[test]
+    fn visible_size_and_hotspot_are_independent_of_transparent_padding() {
+        let a = fixture(80, 80, 1, &[(0, 20, 12, 40, 52)]);
+        let b = fixture(120, 120, 1, &[(0, 50, 42, 70, 82)]);
+        let (ar, ah) = cursor_layout(&a, Size::new(80., 80.), Point::new(22., 14.), 1).unwrap();
+        let (br, bh) = cursor_layout(&b, Size::new(120., 120.), Point::new(52., 44.), 1).unwrap();
+        assert!((ah.x - bh.x).abs() < 1e-9 && (ah.y - bh.y).abs() < 1e-9);
+        let af = ar.size.width / 80.;
+        let bf = br.size.width / 120.;
+        assert!((ar.origin.x + 20. * af - br.origin.x - 50. * bf).abs() < 1e-9);
+        assert!((40. * af - 35.5).abs() < 1e-9);
+        assert!((ah.x - (ar.origin.x + 22. * af)).abs() < 1e-9);
+        assert!((ah.y - (64. - ar.origin.y - ar.size.height + 14. * af)).abs() < 1e-9);
+    }
+    #[test]
+    fn animation_uses_union_of_frames_and_keeps_distant_hotspots_inside_canvas() {
+        let pixels = fixture(64, 64, 2, &[(0, 10, 20, 20, 40), (1, 30, 10, 45, 40)]);
+        let (rect, hot) =
+            cursor_layout(&pixels, Size::new(64., 64.), Point::new(12., 20.), 2).unwrap();
+        assert!((rect.size.width / 64. * 35. - 35.5).abs() < 1e-9);
+        validate(Size::new(64., 64.), hot, 2, 0.1).unwrap();
+        let padded = fixture(100, 100, 1, &[(0, 10, 10, 20, 20)]);
+        let (rect, hot) =
+            cursor_layout(&padded, Size::new(100., 100.), Point::new(99., 99.), 1).unwrap();
+        assert!((hot.x - 63.).abs() < 1e-9 && (hot.y - 63.).abs() < 1e-9);
+        assert!((hot.x - (rect.origin.x + 99. * rect.size.width / 100.)).abs() < 1e-9);
+        validate(Size::new(64., 64.), hot, 1, 0.).unwrap();
+    }
     #[test]
     fn rejects_invalid_hotspots_and_nonfinite_values() {
         let size = Size::new(32., 32.);

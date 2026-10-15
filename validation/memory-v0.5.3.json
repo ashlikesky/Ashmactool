@@ -1,0 +1,64 @@
+{
+  "date": "2026-10-15",
+  "platform": "macOS 27.0 Apple Silicon",
+  "metric": "vmmap Physical footprint; values retain vmmap M notation",
+  "method": "Sequential local restarts with same saved preferences; short samples, not an isolated benchmark or a long-term leak test. RSS includes shared mappings and is not the reported physical-footprint result.",
+  "baseline_version": "0.5.2",
+  "final_version": "0.5.3",
+  "profile": {
+    "style": "glow",
+    "size": 35.0,
+    "show_percent": 0.0
+  },
+  "baseline_samples": [
+    {
+      "version": "0.5.2",
+      "pid": "10987",
+      "sample": 0,
+      "ps_rss_cpu_cputime": "88912   0.0   0:00.22",
+      "physical_footprint": "44.6M"
+    },
+    {
+      "version": "0.5.2",
+      "pid": "10987",
+      "sample": 1,
+      "ps_rss_cpu_cputime": "88912   0.0   0:00.22",
+      "physical_footprint": "44.5M"
+    },
+    {
+      "version": "0.5.2",
+      "pid": "10987",
+      "sample": 2,
+      "ps_rss_cpu_cputime": "108928   0.0   0:00.41",
+      "physical_footprint": "51.1M"
+    }
+  ],
+  "final_samples": [
+    {
+      "version": "0.5.3",
+      "pid": "45326",
+      "sample": 0,
+      "ps_rss_cpu_cputime_elapsed": "83072   1.1   0:00.35 00:20",
+      "physical_footprint": "35.6M",
+      "cg_raster_data": null
+    },
+    {
+      "version": "0.5.3",
+      "pid": "45326",
+      "sample": 1,
+      "ps_rss_cpu_cputime_elapsed": "83088   0.0   0:00.37 00:31",
+      "physical_footprint": "35.6M",
+      "cg_raster_data": null
+    },
+    {
+      "version": "0.5.3",
+      "pid": "45326",
+      "sample": 2,
+      "ps_rss_cpu_cputime_elapsed": "83120   0.0   0:00.41 00:42",
+      "physical_footprint": "35.6M",
+      "cg_raster_data": null
+    }
+  ],
+  "baseline_cg_raster": "10.2M",
+  "final_cg_raster": "No separate CG Raster Data category in the captured summaries."
+}
