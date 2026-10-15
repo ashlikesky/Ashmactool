@@ -2,6 +2,8 @@ use crate::{
     cursor::{self, Engine},
     native::{self, Obj, Result},
     power::KeepAwake,
+    status_icon,
+    system_status::{self, Battery, Monitor, Snapshot, WifiState},
 };
 use objc2::{
     class, msg_send,
@@ -107,8 +109,13 @@ struct App {
     target: Obj,
     status: Obj,
     last_error: Option<String>,
+    snapshot: Snapshot,
+    icon_view: Obj,
+    wifi_menu: Obj,
+    battery_menu: Obj,
+    monitor: Option<Monitor>,
 }
-thread_local! {static APP:RefCell<Option<App>>=const{RefCell::new(None)};static BUSY:Cell<bool>=const{Cell::new(false)};static PENDING_EVENT:Cell<bool>=const{Cell::new(false)};}
+thread_local! {static APP:RefCell<Option<App>>=const{RefCell::new(None)};static BUSY:Cell<bool>=const{Cell::new(false)};static PENDING_EVENT:Cell<bool>=const{Cell::new(false)};static PENDING_STATUS:Cell<bool>=const{Cell::new(false)};static MENU_OPEN:Cell<bool>=const{Cell::new(false)};}
 
 fn action(f: impl FnOnce(&mut App) -> Result<()>) {
     // NSOpenPanel/NSAlert run nested event loops. Notifications during a modal
@@ -130,6 +137,9 @@ fn action(f: impl FnOnce(&mut App) -> Result<()>) {
         }
     });
     BUSY.with(|b| b.set(false));
+    if PENDING_STATUS.with(|p| p.replace(false)) {
+        refresh_system_status();
+    }
     if PENDING_EVENT.with(|p| p.replace(false)) {
         background_refresh();
     }
@@ -186,9 +196,179 @@ impl App {
             let _: () = msg_send![&item,setSubmenu:submenu];
         }
     }
-    fn rebuild(&self) {
+    fn update_status_icon(&self) {
+        status_icon::set_state(&self.snapshot);
         unsafe {
-            for menu in [&self.menu, &self.cursor_menu, &self.size_menu] {
+            let _: () = msg_send![&self.icon_view,setNeedsDisplay:true];
+            let button: Obj = msg_send![&self.status, button];
+            let description = self.snapshot.accessibility();
+            let _: () = msg_send![&button,setAccessibilityLabel:&*native::string(&description)];
+            let _: () = msg_send![&button,setToolTip:&*native::string(&description)];
+        }
+    }
+    fn system_menus(&self) {
+        let wifi = &self.snapshot.wifi;
+        self.add(
+            &self.wifi_menu,
+            &format!("状态：{}", wifi.summary()),
+            None,
+            60,
+            false,
+            false,
+        );
+        if matches!(wifi.state, WifiState::Connected | WifiState::Sharing) {
+            self.add(
+                &self.wifi_menu,
+                &wifi
+                    .ssid
+                    .as_deref()
+                    .map(|s| format!("网络：{s}"))
+                    .unwrap_or_else(|| "网络名称受系统隐私限制".into()),
+                None,
+                61,
+                false,
+                false,
+            );
+            for (tag, title) in [
+                (
+                    62,
+                    wifi.rssi
+                        .map(|n| format!("信号：{n} dBm"))
+                        .unwrap_or_else(|| "信号：未知".into()),
+                ),
+                (
+                    63,
+                    wifi.noise
+                        .map(|n| format!("噪声：{n} dBm"))
+                        .unwrap_or_else(|| "噪声：未知".into()),
+                ),
+                (
+                    64,
+                    wifi.rate
+                        .map(|n| format!("传输速率：{n:.0} Mbps"))
+                        .unwrap_or_else(|| "传输速率：未知".into()),
+                ),
+                (
+                    65,
+                    wifi.channel
+                        .map(|n| format!("信道：{n}"))
+                        .unwrap_or_else(|| "信道：未知".into()),
+                ),
+            ] {
+                self.add(&self.wifi_menu, &title, None, tag, false, false);
+            }
+        }
+        self.separator(&self.wifi_menu);
+        self.add(
+            &self.wifi_menu,
+            "Wi-Fi 设置…",
+            Some(sel!(settings:)),
+            50,
+            false,
+            true,
+        );
+        self.add(
+            &self.battery_menu,
+            &self.snapshot.battery.summary(),
+            None,
+            70,
+            false,
+            false,
+        );
+        match &self.snapshot.battery {
+            Battery::None => self.add(
+                &self.battery_menu,
+                "此 Mac 无内置电池，电量弧固定为满格",
+                None,
+                71,
+                false,
+                false,
+            ),
+            Battery::Internal {
+                minutes: Some(minutes),
+                charging,
+                ..
+            } => {
+                let duration = if *minutes >= 60 {
+                    format!("{} 小时 {} 分钟", minutes / 60, minutes % 60)
+                } else {
+                    format!("{minutes} 分钟")
+                };
+                self.add(
+                    &self.battery_menu,
+                    &format!(
+                        "预计{}：{duration}",
+                        if *charging { "充满" } else { "剩余" }
+                    ),
+                    None,
+                    71,
+                    false,
+                    false,
+                );
+            }
+            _ => {}
+        }
+        self.separator(&self.battery_menu);
+        self.add(
+            &self.battery_menu,
+            if matches!(self.snapshot.battery, Battery::None) {
+                "节能设置…"
+            } else {
+                "电池设置…"
+            },
+            Some(sel!(settings:)),
+            51,
+            false,
+            true,
+        );
+        if let Some(monitor) = &self.monitor {
+            for warning in &monitor.warnings {
+                self.add(&self.battery_menu, warning, None, 79, false, false);
+            }
+        }
+        self.submenu(
+            &self.menu,
+            &format!("Wi-Fi · {}", wifi.summary()),
+            &self.wifi_menu,
+            40,
+        );
+        let power_title = if matches!(self.snapshot.battery, Battery::None) {
+            "电源"
+        } else {
+            "电池"
+        };
+        self.submenu(
+            &self.menu,
+            &format!("{power_title} · {}", self.snapshot.battery.summary()),
+            &self.battery_menu,
+            41,
+        );
+        unsafe {
+            for (tag, symbol) in [(40, "wifi"), (41, "battery.100percent")] {
+                let item: Obj = msg_send![&self.menu,itemWithTag:tag as isize];
+                let image: Option<Obj> = msg_send![class!(NSImage),imageWithSystemSymbolName:&*native::string(symbol),accessibilityDescription:std::ptr::null::<AnyObject>()];
+                if let Some(image) = image {
+                    let _: () = msg_send![&image,setSize:Size::new(16.,16.)];
+                    let _: () = msg_send![&image,setTemplate:true];
+                    let _: () = msg_send![&item,setImage:&*image];
+                }
+            }
+        }
+    }
+    fn rebuild(&self) {
+        self.update_status_icon();
+        // Keep tracked menu items alive until AppKit completes action dispatch.
+        if MENU_OPEN.with(|v| v.get()) {
+            return;
+        }
+        unsafe {
+            for menu in [
+                &self.menu,
+                &self.cursor_menu,
+                &self.size_menu,
+                &self.wifi_menu,
+                &self.battery_menu,
+            ] {
                 let _: () = msg_send![menu, removeAllItems];
             }
             let cursor_status = if self.engine.error.is_some() {
@@ -210,6 +390,8 @@ impl App {
                 false,
                 false,
             );
+            self.separator(&self.menu);
+            self.system_menus();
             self.separator(&self.menu);
             for (tag, key, label) in [
                 (1, "glow", "柔光主题"),
@@ -326,11 +508,86 @@ impl App {
                 false,
                 true,
             );
+            self.add(
+                &self.menu,
+                "菜单栏设置…",
+                Some(sel!(settings:)),
+                52,
+                false,
+                true,
+            );
             self.add(&self.menu, "退出", Some(sel!(quit:)), 32, false, true);
-            let button: Obj = msg_send![&self.status, button];
-            let _: () = msg_send![&button,setToolTip:&*native::string(&format!("Ashmactool：{cursor_status}；屏幕唤醒{}", if self.awake.enabled() { "已开启" } else { "已关闭" }))];
         }
     }
+}
+pub(crate) fn refresh_system_status() {
+    if BUSY.with(|b| b.replace(true)) {
+        PENDING_STATUS.with(|p| p.set(true));
+        return;
+    }
+    autoreleasepool(|_| {
+        APP.with(|slot| {
+            if let Some(a) = slot.borrow_mut().as_mut() {
+                let snapshot = Snapshot::read();
+                if snapshot != a.snapshot {
+                    a.snapshot = snapshot;
+                    a.rebuild();
+                }
+            }
+        })
+    });
+    BUSY.with(|b| b.set(false));
+}
+extern "C-unwind" fn system_changed(_: &AnyObject, _: Sel, _: *mut AnyObject) {
+    refresh_system_status();
+}
+extern "C-unwind" fn menu_update(_: &AnyObject, _: Sel, _: *mut AnyObject) {
+    refresh_system_status();
+    APP.with(|s| {
+        if let Some(a) = s.borrow().as_ref() {
+            a.rebuild();
+        }
+    });
+}
+extern "C-unwind" fn menu_open(_: &AnyObject, _: Sel, _: *mut AnyObject) {
+    MENU_OPEN.with(|v| v.set(true));
+    APP.with(|s| {
+        if let Some(a) = s.borrow().as_ref() {
+            a.update_status_icon();
+        }
+    });
+}
+extern "C-unwind" fn menu_close(_: &AnyObject, _: Sel, _: *mut AnyObject) {
+    MENU_OPEN.with(|v| v.set(false));
+    APP.with(|s| {
+        if let Some(a) = s.borrow().as_ref() {
+            a.update_status_icon();
+        }
+    });
+}
+extern "C-unwind" fn settings(_: &AnyObject, _: Sel, sender: *mut AnyObject) {
+    action(|a| unsafe {
+        let tag: isize = msg_send![sender, tag];
+        let pane = match tag {
+            50 => "com.apple.wifi-settings-extension",
+            51 => {
+                if matches!(a.snapshot.battery, Battery::None) {
+                    "com.apple.preference.energysaver"
+                } else {
+                    "com.apple.Battery-Settings.extension"
+                }
+            }
+            _ => "com.apple.ControlCenter-Settings.extension",
+        };
+        let url: Option<Obj> = msg_send![class!(NSURL),URLWithString:&*native::string(&format!("x-apple.systempreferences:{pane}"))];
+        let workspace: Obj = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let opened: bool = msg_send![&workspace,openURL:&*url.ok_or("无法生成设置链接")?];
+        if opened {
+            Ok(())
+        } else {
+            Err("无法打开系统设置".into())
+        }
+    });
 }
 fn in_bundle() -> bool {
     std::env::current_exe()
@@ -395,6 +652,7 @@ extern "C-unwind" fn toggle_awake(_: &AnyObject, _: Sel, _: *mut AnyObject) {
     });
 }
 extern "C-unwind" fn wake(_: &AnyObject, _: Sel, _: *mut AnyObject) {
+    refresh_system_status();
     background_refresh();
 }
 fn background_refresh() {
@@ -564,8 +822,8 @@ extern "C-unwind" fn login(_: &AnyObject, _: Sel, _: *mut AnyObject) {
 extern "C-unwind" fn about(_: &AnyObject, _: Sel, _: *mut AnyObject) {
     action(|_| {
         native::alert(
-            "Ashmactool 0.3.1",
-            "Rust 编写的原生菜单栏工具箱。\n\n指针样式 · PNG / .cape 导入 · 保持屏幕唤醒\n\n屏幕唤醒防止闲置熄屏；合盖、手动睡眠和锁屏仍由系统处理。关闭开关或退出时释放。重启应用默认关闭。\n\n退出时恢复原始指针。系统沙滩球受接口限制以 24 帧恢复原生外观和周期，完整原始帧单独保留。\n\n私有光标接口思路来自 Alex Zielenski 的 Mousecape；参考 sdmj76 的现代版本。独立 Rust 实现采用 MIT 许可，第三方声明随包保留。\n\n部分应用自行绘制指针，可能覆盖系统主题。系统升级后可能需要兼容性更新。\n\n导入主题和原始指针备份保存在用户的 Application Support/Ashmactool 中。",
+            "Ashmactool 0.4.0",
+            "Rust 编写的原生菜单栏工具箱。\n\nWi-Fi 与电量组合图标 · 指针样式 · PNG / .cape 导入 · 保持屏幕唤醒\n\n屏幕唤醒防止闲置熄屏；合盖、手动睡眠和锁屏仍由系统处理。关闭开关或退出时释放。重启应用默认关闭。\n\n退出时恢复原始指针。系统沙滩球受接口限制以 24 帧恢复原生外观和周期，完整原始帧单独保留。\n\n私有光标接口思路来自 Alex Zielenski 的 Mousecape；参考 sdmj76 的现代版本。独立 Rust 实现采用 MIT 许可，第三方声明随包保留。\n\n部分应用自行绘制指针，可能覆盖系统主题。系统升级后可能需要兼容性更新。\n\n导入主题和原始指针备份保存在用户的 Application Support/Ashmactool 中。",
         );
         Ok(())
     });
@@ -587,6 +845,7 @@ extern "C-unwind" fn will_terminate(_: &AnyObject, _: Sel, _: *mut AnyObject) {
     }
     APP.with(|s| {
         if let Some(a) = s.borrow_mut().as_mut() {
+            a.monitor.take();
             if let Err(e) = a.awake.disable() {
                 eprintln!("退出时释放电源请求失败：{e}");
             }
@@ -622,34 +881,61 @@ pub fn run(smoke_test: bool) -> Result<()> {
             (sel!(about:), about),
             (sel!(quit:), quit),
             (sel!(wake:), wake),
+            (sel!(systemChanged:), system_changed),
+            (sel!(settings:), settings),
+            (sel!(menuNeedsUpdate:), menu_update),
+            (sel!(menuWillOpen:), menu_open),
+            (sel!(menuDidClose:), menu_close),
+            (
+                sel!(powerStateDidChangeForWiFiInterfaceWithName:),
+                system_status::wifi_changed,
+            ),
+            (
+                sel!(ssidDidChangeForWiFiInterfaceWithName:),
+                system_status::wifi_changed,
+            ),
+            (
+                sel!(bssidDidChangeForWiFiInterfaceWithName:),
+                system_status::wifi_changed,
+            ),
+            (
+                sel!(linkDidChangeForWiFiInterfaceWithName:),
+                system_status::wifi_changed,
+            ),
+            (
+                sel!(modeDidChangeForWiFiInterfaceWithName:),
+                system_status::wifi_changed,
+            ),
             (sel!(applicationWillTerminate:), will_terminate),
         ] {
             builder.add_method(selector, callback as extern "C-unwind" fn(_, _, _));
         }
+        builder.add_method(
+            sel!(linkQualityDidChangeForWiFiInterfaceWithName:rssi:transmitRate:),
+            system_status::wifi_quality as extern "C-unwind" fn(_, _, _, _, _),
+        );
         let target: Obj = msg_send![builder.register(), new];
         let app: Obj = msg_send![class!(NSApplication), sharedApplication];
         let _: bool = msg_send![&app,setActivationPolicy:1isize];
         let _: () = msg_send![&app,setDelegate:&*target];
         let statusbar: Obj = msg_send![class!(NSStatusBar), systemStatusBar];
-        let status: Obj = msg_send![&statusbar,statusItemWithLength:-1f64];
+        let status: Obj = msg_send![&statusbar,statusItemWithLength:28f64];
         let button: Obj = msg_send![&status, button];
-        let image: Option<Obj> = msg_send![class!(NSImage),imageWithSystemSymbolName:&*native::string("wrench.and.screwdriver"),accessibilityDescription:&*native::string("Ashmactool")];
-        if let Some(image) = image {
-            let _: () = msg_send![&image,setTemplate:true];
-            let _: () = msg_send![&image,setSize:Size::new(18.,18.)];
-            let _: () = msg_send![&button,setImage:&*image];
-        } else {
-            let _: () = msg_send![&button,setTitle:&*native::string("A")];
-        }
+        let icon_view = status_icon::install(&button)?;
+        let snapshot = Snapshot::read();
+        let monitor = Some(Monitor::new(&target));
         let menu: Obj = msg_send![class!(NSMenu), new];
         let _: () = msg_send![&menu,setAutoenablesItems:false];
+        let _: () = msg_send![&menu,setDelegate:&*target];
         let _: () = msg_send![&status,setMenu:&*menu];
         let mut engine = Engine::new(native::support()?.join("original.cape"))?;
         engine.restore()?;
         let prefs = Preferences::load()?;
         let cursor_menu: Obj = msg_send![class!(NSMenu), new];
         let size_menu: Obj = msg_send![class!(NSMenu), new];
-        for submenu in [&cursor_menu, &size_menu] {
+        let wifi_menu: Obj = msg_send![class!(NSMenu), new];
+        let battery_menu: Obj = msg_send![class!(NSMenu), new];
+        for submenu in [&cursor_menu, &size_menu, &wifi_menu, &battery_menu] {
             let _: () = msg_send![submenu,setAutoenablesItems:false];
         }
         let mut state = App {
@@ -662,6 +948,11 @@ pub fn run(smoke_test: bool) -> Result<()> {
             target: target.clone(),
             status,
             last_error: None,
+            snapshot,
+            icon_view,
+            wifi_menu,
+            battery_menu,
+            monitor,
         };
         if prefs.style != "none" {
             if let Err(e) = state.activate(prefs) {
@@ -689,6 +980,53 @@ pub fn run(smoke_test: bool) -> Result<()> {
                 let menu = APP.with(|s| s.borrow().as_ref().unwrap().menu.clone());
                 let cursors = APP.with(|s| s.borrow().as_ref().unwrap().cursor_menu.clone());
                 let sizes = APP.with(|s| s.borrow().as_ref().unwrap().size_menu.clone());
+                APP.with(|s| -> Result<()> {
+                    let slot = s.borrow();
+                    let a = slot.as_ref().unwrap();
+                    for tag in [40isize, 41, 52] {
+                        let item: Option<Obj> = msg_send![&a.menu,itemWithTag:tag];
+                        if item.is_none() {
+                            return Err(format!("系统菜单缺失 {tag}"));
+                        }
+                    }
+                    let button: Obj = msg_send![&a.status, button];
+                    let label: Obj = msg_send![&button, accessibilityLabel];
+                    if !native::text(&label).contains("Wi-Fi") {
+                        return Err("组合图标缺少无障碍描述".into());
+                    }
+                    println!(
+                        "system_info_submenus=passed accessibility=passed event_warnings={}",
+                        a.monitor.as_ref().unwrap().warnings.len()
+                    );
+                    Ok(())
+                })?;
+                // Check real AppKit view callbacks, plus desktop and tracking
+                // behavior, without changing network or battery settings.
+                crate::status_icon::self_test()?;
+                APP.with(|s| -> Result<()> {
+                    let mut slot=s.borrow_mut();let a=slot.as_mut().unwrap();
+                    let original=a.snapshot.clone();
+                    a.snapshot=Snapshot::fixture(Battery::None,WifiState::Connected);a.rebuild();
+                    let item:Obj=msg_send![&a.menu,itemWithTag:41isize];
+                    let title:Obj=msg_send![&item,title];
+                    if !native::text(&title).contains("无内置电池") {return Err("桌面 Mac 电源菜单不正确".into());}
+                    MENU_OPEN.with(|m|m.set(true));
+                    a.snapshot=Snapshot::fixture(Battery::Internal{percent:Some(48.),charging:true,external:true,full:false,minutes:None},WifiState::Connected);a.rebuild();
+                    let tracked:Obj=msg_send![&a.menu,itemWithTag:41isize];
+                    let same=Obj::as_ptr(&item)==Obj::as_ptr(&tracked);
+                    MENU_OPEN.with(|m|m.set(false));
+                    a.snapshot=original;a.rebuild();
+                    if !same {return Err("菜单跟踪期间替换了菜单项".into());}
+                    let bounds:Rect=msg_send![&a.icon_view,bounds];
+                    let rep:Option<Obj>=msg_send![&a.icon_view,bitmapImageRepForCachingDisplayInRect:bounds];
+                    let rep=rep.ok_or("无法回读原生图标视图")?;
+                    let _:()=msg_send![&a.icon_view,cacheDisplayInRect:bounds,toBitmapImageRep:&*rep];
+                    let width:isize=msg_send![&rep,pixelsWide];
+                    if width<22 {return Err("图标实际尺寸无效".into());}
+                    if !a.monitor.as_ref().unwrap().warnings.is_empty() {return Err("部分系统事件订阅失败".into());}
+                    println!("native_status_view=passed tracking_items_preserved=passed desktop_menu=passed wifi_events=6 power_events=registered");
+                    Ok(())
+                })?;
                 let item: Obj = msg_send![&cursors,itemWithTag:1isize];
                 let dispatched: bool =
                     msg_send![&app,sendAction:sel!(choose:),to:&*target,from:&*item];

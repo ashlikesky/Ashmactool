@@ -10,6 +10,7 @@ Rust 编写的 macOS 菜单栏小工具箱。原生 AppKit 界面、单进程、
 
 | 工具 | 功能 |
 | --- | --- |
+| 菜单栏组合图标 | Wi-Fi 与电量共用一个圆形外轮廓；充电显示绿色圆弧和嵌入外圈的闪电；点击查看网络与电源信息 |
 | 指针样式 | 柔光 / 黑色 / 白色整套主题，覆盖文本、链接、拖动、缩放和忙碌等状态；支持 PNG / .cape 导入 |
 | 保持屏幕唤醒 | 开关控制，防止闲置熄屏，关闭或退出时释放，重启应用默认关闭 |
 
@@ -19,11 +20,29 @@ Rust 编写的 macOS 菜单栏小工具箱。原生 AppKit 界面、单进程、
 
 ## 下载与使用
 
-在 GitHub [Releases](https://github.com/ashlikesky/Ashmactool/releases) 下载 `Ashmactool-macOS-arm64.zip`，解压，将 `Ashmactool.app` 拖入 `/Applications` 后打开。点击菜单栏的工具图标操作。
+在 GitHub [Releases](https://github.com/ashlikesky/Ashmactool/releases) 下载 `Ashmactool-macOS-arm64.zip`，解压，将 `Ashmactool.app` 拖入 `/Applications` 后打开。点击菜单栏的组合图标操作。
 
 当前发布包针对 Apple Silicon。最低构建目标是 macOS 14，实际运行验证环境见 [VALIDATION.md](VALIDATION.md)。本地包为 ad hoc 签名，尚未使用 Developer ID 签名和公证；若系统提示无法验证开发者，使用系统设置 → 隐私与安全性中的“仍要打开”。
 
 退出应用会恢复本工具保存的原始指针并释放屏幕唤醒请求。登录启动需要将应用放入固定位置，再使用菜单中的“登录时启动”。
+
+## Wi-Fi 与电量组合图标
+
+菜单栏使用 22 点矢量图标：Wi-Fi 最外层信号弧和电量弧共用同一个圆心、半径与线宽，两侧只留小缺口。Wi-Fi 内层弧和圆点保留在圆内；满信号时最外层弧构成外圆的上部，电量进度构成其余部分。
+
+- 电量从左侧沿外圆向下、向右增长，底色轨道保留完整轮廓。
+- 充电时进度与闪电为绿色，闪电嵌在外圈正下方；接电但未充电不会误显示充电。
+- 使用电池且电量不超过 20% 时显示红色；电源信息未知时使用分段弧。
+- 无内置电池的 Mac 使用固定满进度，菜单注明“无内置电池”。UPS 等外置电源不作为内置电池。
+- Wi-Fi 强度、关闭、未连接状态分别呈现，并提供文字提示及无障碍描述。
+
+点击展开原生菜单，可查看 Wi-Fi 连接状态、系统允许提供的网络名称、RSSI、噪声、速率、信道，以及电量、充电状态和系统提供的预计时间，并进入对应系统设置。macOS 可能出于定位隐私限制隐藏网络名称；本工具不请求定位，也不绕过限制，仍可显示已连接状态与可用参数。信息不上传、不记录网络名称。
+
+更新使用 CoreWLAN 的 Wi-Fi 事件及 IOKit 电源通知，不使用定时轮询。菜单每次打开都会重新读取状态；展开期间保留正在跟踪的菜单项，下一次打开更新完整内容。图标随状态与外观变化刷新。
+
+本工具使用自己的菜单栏位置，不能通过公开接口修改系统 Wi-Fi 菜单项或复用控制中心的私有面板。若希望菜单栏只保留组合图标，可在 macOS 的菜单栏/控制中心设置中手动隐藏原有 Wi-Fi、电池图标；应用不会修改这些系统开关。
+
+[查看浅色、深色及充电等状态预览](previews/status/menu-bar.png)。左侧小图为实际 22 点尺寸，旁边为放大细节；预览使用模拟状态，图形与实际菜单栏共用绘制代码。
 
 ## 系统指针覆盖
 
@@ -65,6 +84,9 @@ cd Ashmactool
 cargo build --release --locked
 cargo test --locked
 cargo clippy --all-targets --locked -- -D warnings
+cargo run --locked -- --status-doctor
+cargo run --locked -- --status-icon-test
+cargo run --locked -- --status-preview /tmp/ashmactool-status
 cargo run --locked -- --doctor
 cargo run --locked -- --preview-all /tmp/ashmactool-previews
 cargo run --locked -- --power-self-test
@@ -73,13 +95,15 @@ cargo run --locked -- --ui-smoke-test
 ./scripts/package.sh
 ```
 
-`--doctor`、`--inspect FILE.cape`、`--preview DIRECTORY`、`--preview-all DIRECTORY` 不替换当前系统指针。`--self-test` 短暂注册样式，回读并立即恢复，检查保存的原始像素（沙滩球使用上文说明的 24 帧恢复形式）。`--power-self-test` 创建电源请求，回读后立即释放。`--ui-smoke-test` 通过 AppKit 动作分发验证菜单，结束时恢复配置；不启用登录启动。指针测试需要先退出正在运行的本应用。
+`--status-doctor`、`--status-icon-test`、`--status-preview DIRECTORY`、`--doctor`、`--inspect FILE.cape`、`--preview DIRECTORY`、`--preview-all DIRECTORY` 不替换当前系统指针。`--self-test` 短暂注册样式，回读并立即恢复，检查保存的原始像素（沙滩球使用上文说明的 24 帧恢复形式）。`--power-self-test` 创建电源请求，回读后立即释放。`--ui-smoke-test` 通过 AppKit 动作分发验证菜单，结束时恢复配置；不启用登录启动。指针测试需要先退出正在运行的本应用。
 
 打包默认输出到项目上一级；可设置 `ASHMACTOOL_OUTPUT_DIR`。支持 `CARGO_TARGET_DIR`，无需将编译缓存放在源码目录。包内嵌入完整 `AppIcon.icns`；图标来源和提示词见 [assets/ICON.md](assets/ICON.md)。
 
 ## 代码结构
 
 - `app.rs`：原生菜单、工具状态、导入和登录启动。
+- `status_icon.rs`：同圆的 Wi-Fi / 电量图标、外观适配和状态预览。
+- `system_status.rs`：只读系统快照、Wi-Fi 事件和电源通知订阅。
 - `cursor.rs` / `graphics.rs`：指针注册、备份恢复和图像。
 - `power.rs`：进程持有的 IOKit 电源请求，创建、回读和释放。
 - `native.rs`：原生对象和 plist 文件操作。

@@ -4,6 +4,8 @@ mod cursor;
 mod graphics;
 mod native;
 mod power;
+mod status_icon;
+mod system_status;
 use native::Result;
 use objc2::{class, msg_send, rc::autoreleasepool};
 use std::{fs::File, os::fd::AsRawFd, path::PathBuf};
@@ -45,7 +47,31 @@ fn entry() -> Result<()> {
     match args.first().map(String::as_str) {
         Some("--help") => {
             println!(
-                "Ashmactool 0.3.1\n默认：运行菜单栏应用\n--doctor：检查接口与系统箭头，不修改指针\n--inspect FILE.cape：验证主题，不修改指针\n--preview DIRECTORY：导出箭头 PNG\n--preview-all DIRECTORY：导出整套指针预览\n--restore：恢复本工具保存的原始指针\n--self-test：短暂注册内置指针，检查后立即恢复\n--power-self-test：回读屏幕唤醒请求，再释放并回读\n--ui-smoke-test：验证原生菜单动作并恢复测试前配置"
+                "Ashmactool 0.4.0\n默认：运行菜单栏应用\n--status-doctor：读取 Wi-Fi 与电源信息，不修改状态\n--status-preview DIRECTORY：导出菜单栏图标预览\n--status-icon-test：验证电量圆弧与充电配色\n--doctor：检查接口与系统箭头，不修改指针\n--inspect FILE.cape：验证主题，不修改指针\n--preview DIRECTORY：导出箭头 PNG\n--preview-all DIRECTORY：导出整套指针预览\n--restore：恢复本工具保存的原始指针\n--self-test：短暂注册内置指针，检查后立即恢复\n--power-self-test：回读屏幕唤醒请求，再释放并回读\n--ui-smoke-test：验证原生菜单动作并恢复测试前配置"
+            );
+            Ok(())
+        }
+        Some("--status-preview") => {
+            let dir = PathBuf::from(args.get(1).ok_or("缺少输出目录")?);
+            status_icon::self_test()?;
+            status_icon::export(&dir)?;
+            println!("status_preview={}", dir.display());
+            Ok(())
+        }
+        Some("--status-icon-test") => status_icon::self_test(),
+        Some("--status-doctor") => {
+            let snapshot = system_status::Snapshot::read();
+            println!(
+                "wifi={} ssid={} rssi={:?} channel={:?} battery={}",
+                snapshot.wifi.summary(),
+                if snapshot.wifi.ssid.is_some() {
+                    "available"
+                } else {
+                    "hidden_or_unavailable"
+                },
+                snapshot.wifi.rssi,
+                snapshot.wifi.channel,
+                snapshot.battery.summary()
             );
             Ok(())
         }
