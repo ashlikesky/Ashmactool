@@ -9,7 +9,11 @@ use objc2::{
     sel,
 };
 use objc2_core_foundation::{CGPoint as Point, CGRect as Rect, CGSize as Size};
-use std::{cell::RefCell, path::Path, sync::OnceLock};
+use std::{
+    cell::{Cell, RefCell},
+    path::Path,
+    sync::OnceLock,
+};
 const OUTER_RADIUS: f64 = 8.;
 const STROKE: f64 = 1.7;
 const WIFI_START: f64 = 35.;
@@ -18,10 +22,18 @@ const BATTERY_START: f64 = 167.;
 const BATTERY_END: f64 = 373.;
 const BOLT_GAP_START: f64 = 242.;
 const BOLT_GAP_END: f64 = 298.;
-thread_local! { static STATE: RefCell<Snapshot> = RefCell::new(Snapshot::fixture(Battery::Unavailable, WifiState::Unavailable)); }
+thread_local! { static SHOW_PERCENT:Cell<bool>=const{Cell::new(false)}; static STATE: RefCell<Snapshot> = RefCell::new(Snapshot::fixture(Battery::Unavailable, WifiState::Unavailable)); }
 
-pub fn set_state(snapshot: &Snapshot) {
+pub fn set_state(snapshot: &Snapshot, show_percent: bool) {
+    SHOW_PERCENT.with(|s| s.set(show_percent));
     STATE.with(|s| *s.borrow_mut() = snapshot.clone());
+}
+pub fn width(snapshot: &Snapshot, show_percent: bool) -> f64 {
+    if show_percent && snapshot.battery.percent_label().is_some() {
+        64.
+    } else {
+        28.
+    }
 }
 pub fn install(button: &AnyObject) -> Result<Obj> {
     static VIEW_CLASS: OnceLock<&'static objc2::runtime::AnyClass> = OnceLock::new();
@@ -85,14 +97,46 @@ extern "C-unwind" fn draw_rect(view: &AnyObject, _: Sel, _: Rect) {
         } else {
             msg_send![class!(NSColor), labelColor]
         };
+        let snapshot = STATE.with(|s| s.borrow().clone());
+        let _ = draw_status(
+            &snapshot,
+            SHOW_PERCENT.with(|s| s.get()),
+            &color,
+            bounds.size,
+        );
+    });
+}
+fn draw_status(s: &Snapshot, show_percent: bool, color: &AnyObject, size: Size) -> Result<()> {
+    unsafe {
+        let text = if show_percent {
+            s.battery.percent_label()
+        } else {
+            None
+        };
         let _: () = msg_send![class!(NSGraphicsContext), saveGraphicsState];
         let t: Obj = msg_send![class!(NSAffineTransform), transform];
-        let _: () = msg_send![&t, translateXBy: (bounds.size.width-22.)/2., yBy: (bounds.size.height-22.)/2.];
+        let x = if text.is_some() {
+            3.
+        } else {
+            (size.width - 22.) / 2.
+        };
+        let _: () = msg_send![&t,translateXBy:x,yBy:(size.height-22.)/2.];
         let _: () = msg_send![&t, concat];
-        let snapshot = STATE.with(|s| s.borrow().clone());
-        let _ = draw(&snapshot, &color);
+        let result = draw(s, color);
         let _: () = msg_send![class!(NSGraphicsContext), restoreGraphicsState];
-    });
+        result?;
+        if let Some(text) = text {
+            let attrs = native::dictionary();
+            let font: Obj =
+                msg_send![class!(NSFont),monospacedDigitSystemFontOfSize:11f64,weight:0.23f64];
+            native::insert(&attrs, "NSFont", &font);
+            native::insert(&attrs, "NSColor", color);
+            let text = native::string(&text);
+            let measured: Size = msg_send![&*text, sizeWithAttributes:&*attrs];
+            let _: () = msg_send![&*text, drawAtPoint:Point::new(27., (size.height-measured.height)/2.), withAttributes:&*attrs];
+        }
+        Ok(())
+    }
 }
 fn rgb(r: f64, g: f64, b: f64, a: f64) -> Obj {
     unsafe { msg_send![class!(NSColor), colorWithSRGBRed:r, green:g, blue:b, alpha:a] }
@@ -172,13 +216,8 @@ fn draw(s: &Snapshot, foreground: &AnyObject) -> Result<()> {
             } else {
                 msg_send![foreground,colorWithAlphaComponent:0.27f64]
             };
-            if broken {
-                let segments: &[(f64, f64)] = if radius == OUTER_RADIUS {
-                    &[(35., 57.), (79., 101.), (123., 145.)]
-                } else {
-                    &[(35., 63.), (107., 145.)]
-                };
-                for &(start, end) in segments {
+            if broken && radius == OUTER_RADIUS {
+                for (start, end) in [(35., 76.), (104., 145.)] {
                     arc_segment(&color, start, end, radius, STROKE);
                 }
             } else {
@@ -399,7 +438,38 @@ pub fn export(directory: &Path) -> Result<()> {
         }
         Ok(())
     })?;
-    write_png(&directory.join("menu-bar.png"), &board)
+    write_png(&directory.join("menu-bar.png"), &board)?;
+    let percent_board = bitmap(420, 156, 2, || unsafe {
+        for (col, dark) in [false, true].into_iter().enumerate() {
+            let bg = if dark {
+                rgb(0.09, 0.10, 0.12, 1.)
+            } else {
+                rgb(0.96, 0.96, 0.97, 1.)
+            };
+            let fg = if dark {
+                rgb(0.96, 0.97, 1., 1.)
+            } else {
+                rgb(0.10, 0.11, 0.13, 1.)
+            };
+            let x = col as f64 * 210.;
+            let path: Obj = msg_send![class!(NSBezierPath),bezierPathWithRect:Rect::new(Point::new(x,0.),Size::new(210.,156.))];
+            let _: () = msg_send![&bg, setFill];
+            let _: () = msg_send![&path, fill];
+            for (row, index) in [7usize, 1, 4].into_iter().enumerate() {
+                let (_, battery, wifi) = &scenarios[index];
+                let s = snapshot_for(index, battery, wifi);
+                let _: () = msg_send![class!(NSGraphicsContext), saveGraphicsState];
+                let t: Obj = msg_send![class!(NSAffineTransform), transform];
+                let _: () = msg_send![&t,translateXBy:x+36.,yBy:112.-row as f64*42.];
+                let _: () = msg_send![&t,scaleBy:2f64];
+                let _: () = msg_send![&t, concat];
+                draw_status(&s, true, &fg, Size::new(64., 22.))?;
+                let _: () = msg_send![class!(NSGraphicsContext), restoreGraphicsState];
+            }
+        }
+        Ok(())
+    })?;
+    write_png(&directory.join("percentage.png"), &percent_board)
 }
 
 /// Read-only raster verification using the same drawing path as the live icon.

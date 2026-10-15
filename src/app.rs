@@ -26,6 +26,7 @@ struct Preferences {
     size: f64,
     path: String,
     hot: Point,
+    show_battery_percent: bool,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -34,6 +35,7 @@ impl Default for Preferences {
             size: 28.,
             path: String::new(),
             hot: Point::new(0., 0.),
+            show_battery_percent: false,
         }
     }
 }
@@ -54,6 +56,10 @@ impl Preferences {
                 .unwrap_or_default()
         };
         let mut p = Self {
+            show_battery_percent: native::get(&d, "ShowBatteryPercent")
+                .filter(|v| native::kind(v, c"NSNumber"))
+                .map(|v| unsafe { msg_send![&*v, boolValue] })
+                .unwrap_or(false),
             style: s("Style"),
             size: native::numeric(&d, "Size")?,
             path: s("Path"),
@@ -77,6 +83,11 @@ impl Preferences {
     fn save(&self) -> Result<()> {
         let d = native::dictionary();
         native::insert(&d, "SizeSchema", &native::number(1.));
+        native::insert(
+            &d,
+            "ShowBatteryPercent",
+            &native::number(if self.show_battery_percent { 1. } else { 0. }),
+        );
         native::insert(&d, "Style", &native::string(&self.style));
         native::insert(&d, "Path", &native::string(&self.path));
         for (k, v) in [
@@ -197,8 +208,9 @@ impl App {
         }
     }
     fn update_status_icon(&self) {
-        status_icon::set_state(&self.snapshot);
+        status_icon::set_state(&self.snapshot, self.prefs.show_battery_percent);
         unsafe {
+            let _: () = msg_send![&self.status, setLength:status_icon::width(&self.snapshot, self.prefs.show_battery_percent)];
             let _: () = msg_send![&self.icon_view,setNeedsDisplay:true];
             let button: Obj = msg_send![&self.status, button];
             let description = self.snapshot.accessibility();
@@ -350,6 +362,14 @@ impl App {
             &format!("{power_title} · {}", self.snapshot.battery.summary()),
             &self.battery_menu,
             41,
+        );
+        self.add(
+            &self.menu,
+            "显示电量百分比",
+            Some(sel!(toggleBatteryPercent:)),
+            54,
+            self.prefs.show_battery_percent,
+            true,
         );
         unsafe {
             for (tag, symbol) in [(40, "wifi"), (41, "battery.100percent")] {
@@ -548,6 +568,15 @@ pub(crate) fn refresh_system_status() {
         })
     });
     BUSY.with(|b| b.set(false));
+}
+extern "C-unwind" fn toggle_battery_percent(_: &AnyObject, _: Sel, _: *mut AnyObject) {
+    action(|a| {
+        let mut prefs = a.prefs.clone();
+        prefs.show_battery_percent = !prefs.show_battery_percent;
+        prefs.save()?;
+        a.prefs = prefs;
+        Ok(())
+    });
 }
 extern "C-unwind" fn bluetooth_changed(_: &AnyObject, _: Sel, device: *mut AnyObject) {
     crate::bluetooth::remember(device);
@@ -838,7 +867,7 @@ extern "C-unwind" fn login(_: &AnyObject, _: Sel, _: *mut AnyObject) {
 extern "C-unwind" fn about(_: &AnyObject, _: Sel, _: *mut AnyObject) {
     action(|_| {
         native::alert(
-            "Ashmactool 0.5.0",
+            "Ashmactool 0.5.1",
             "Rust 编写的原生菜单栏工具箱。\n\nWi-Fi / 电量 / 蓝牙组合图标 · 指针样式 · PNG / .cape 导入 · 保持屏幕唤醒\n\n屏幕唤醒防止闲置熄屏；合盖、手动睡眠和锁屏仍由系统处理。关闭开关或退出时释放。重启应用默认关闭。\n\n退出时恢复原始指针。系统沙滩球受接口限制以 24 帧恢复原生外观和周期，完整原始帧单独保留。\n\n私有光标接口思路来自 Alex Zielenski 的 Mousecape；参考 sdmj76 的现代版本。独立 Rust 实现采用 MIT 许可，第三方声明随包保留。\n\n部分应用自行绘制指针，可能覆盖系统主题。系统升级后可能需要兼容性更新。\n\n导入主题和原始指针备份保存在用户的 Application Support/Ashmactool 中。",
         );
         Ok(())
@@ -899,6 +928,7 @@ pub fn run(smoke_test: bool) -> Result<()> {
             (sel!(wake:), wake),
             (sel!(systemChanged:), system_changed),
             (sel!(bluetoothChanged:), bluetooth_changed),
+            (sel!(toggleBatteryPercent:), toggle_battery_percent),
             (sel!(settings:), settings),
             (sel!(menuNeedsUpdate:), menu_update),
             (sel!(menuWillOpen:), menu_open),
@@ -1004,7 +1034,7 @@ pub fn run(smoke_test: bool) -> Result<()> {
                 APP.with(|s| -> Result<()> {
                     let slot = s.borrow();
                     let a = slot.as_ref().unwrap();
-                    for tag in [40isize, 41, 52, 53] {
+                    for tag in [40isize, 41, 52, 53, 54] {
                         let item: Option<Obj> = msg_send![&a.menu,itemWithTag:tag];
                         if item.is_none() {
                             return Err(format!("系统菜单缺失 {tag}"));
@@ -1076,6 +1106,29 @@ pub fn run(smoke_test: bool) -> Result<()> {
                     }
                     Ok(())
                 })?;
+                let original_percent =
+                    APP.with(|s| s.borrow().as_ref().unwrap().prefs.show_battery_percent);
+                for expected in [!original_percent, original_percent] {
+                    let item: Obj = msg_send![&menu,itemWithTag:54isize];
+                    let dispatched: bool = msg_send![&app,sendAction:sel!(toggleBatteryPercent:),to:&*target,from:&*item];
+                    if !dispatched || Preferences::load()?.show_battery_percent != expected {
+                        return Err("电量百分比开关持久化失败".into());
+                    }
+                    APP.with(|s| -> Result<()> {
+                        let slot=s.borrow();let a=slot.as_ref().unwrap();
+                        let length:f64=msg_send![&a.status,length];
+                        let item:Obj=msg_send![&a.menu,itemWithTag:54isize];
+                        let checked:isize=msg_send![&item,state];
+                        if length != status_icon::width(&a.snapshot, expected) || checked != isize::from(expected) {
+                            return Err("电量百分比宽度或菜单状态失败".into());
+                        }
+                        let bounds:Rect=msg_send![&a.icon_view,bounds];
+                        let rep:Obj=msg_send![&a.icon_view,bitmapImageRepForCachingDisplayInRect:bounds];
+                        let _:()=msg_send![&a.icon_view,cacheDisplayInRect:bounds,toBitmapImageRep:&*rep];
+                        Ok(())
+                    })?;
+                }
+                println!("battery_percent_toggle=passed persistence=passed native_layout=passed");
                 let awake: Obj = msg_send![&menu,itemWithTag:20isize];
                 let dispatched: bool =
                     msg_send![&app,sendAction:sel!(toggleAwake:),to:&*target,from:&*awake];

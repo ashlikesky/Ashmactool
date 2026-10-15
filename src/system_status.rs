@@ -53,6 +53,15 @@ impl Battery {
             Self::Internal { percent, .. } => percent.map(|v| v / 100.),
         }
     }
+    pub fn percent_label(&self) -> Option<String> {
+        match self {
+            Self::None => None,
+            Self::Internal {
+                percent: Some(p), ..
+            } => Some(format!("{p:.0}%")),
+            _ => Some("—".into()),
+        }
+    }
     pub fn charging(&self) -> bool {
         matches!(self, Self::Internal { charging: true, .. })
     }
@@ -394,6 +403,30 @@ pub extern "C-unwind" fn wifi_quality(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn percentage_distinguishes_missing_battery_unknown_and_zero() {
+        assert_eq!(super::Battery::None.percent_label(), None);
+        assert_eq!(
+            super::Battery::Unavailable.percent_label().as_deref(),
+            Some("—")
+        );
+        for (percent, expected) in [
+            (Some(0.), "0%"),
+            (Some(79.6), "80%"),
+            (Some(100.), "100%"),
+            (None, "—"),
+        ] {
+            let battery = super::Battery::Internal {
+                percent,
+                charging: false,
+                external: false,
+                full: false,
+                minutes: None,
+            };
+            assert_eq!(battery.percent_label().as_deref(), Some(expected));
+        }
+    }
+
     use super::*;
     use objc2::rc::autoreleasepool;
     #[test]

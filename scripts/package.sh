@@ -31,8 +31,8 @@ cat > "$app_bundle/Contents/Info.plist" <<'PLIST'
 <key>CFBundleDisplayName</key><string>Ashmactool</string>
 <key>CFBundleExecutable</key><string>ashmactool</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.5.0</string>
-<key>CFBundleVersion</key><string>8</string>
+<key>CFBundleShortVersionString</key><string>0.5.1</string>
+<key>CFBundleVersion</key><string>9</string>
 <key>CFBundleIconFile</key><string>AppIcon.icns</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSUIElement</key><true/>
