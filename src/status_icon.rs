@@ -233,12 +233,20 @@ fn draw(s: &Snapshot, foreground: &AnyObject) -> Result<()> {
         let _: () = msg_send![&dot_color, setFill];
         let _: () = msg_send![&dot, fill];
         if s.battery.show_bolt() {
-            symbol(
+            let _: () = msg_send![class!(NSGraphicsContext), saveGraphicsState];
+            let t: Obj = msg_send![class!(NSAffineTransform), transform];
+            let _: () = msg_send![&t, translateXBy:11f64, yBy:4.8f64];
+            // AppKit's unflipped drawing coordinates use positive CCW angles.
+            let _: () = msg_send![&t, rotateByDegrees:-15f64];
+            let _: () = msg_send![&t, concat];
+            let result = symbol(
                 "bolt.fill",
                 1.,
-                Rect::new(Point::new(8.2, 0.0), Size::new(5.6, 7.7)),
+                Rect::new(Point::new(-3.2, -4.45), Size::new(6.4, 8.9)),
                 &battery_color,
-            )?;
+            );
+            let _: () = msg_send![class!(NSGraphicsContext), restoreGraphicsState];
+            result?;
         }
     }
     Ok(())
